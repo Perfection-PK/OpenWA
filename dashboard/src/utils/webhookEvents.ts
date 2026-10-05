@@ -26,5 +26,6 @@ export const availableEventNames = [
   'call.rejected',
   'call.missed',
   'status.received',
+  'lead.saved',
   '*',
 ] as const;

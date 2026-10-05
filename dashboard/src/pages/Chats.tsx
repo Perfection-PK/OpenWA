@@ -4,7 +4,7 @@ import { Trans, useTranslation } from 'react-i18next';
 import { nextReconnectState } from '../utils/reconnectState';
 import { applyIncomingToChatList, promoteChatWithSnippet } from '../utils/chatList';
 import { filterChats, filterChannels, groupStatusesByContact } from '../utils/chatFilters';
-import { ArrowLeft, Loader2, Megaphone, CircleDashed, AlertCircle, MessageSquare } from 'lucide-react';
+import { ArrowLeft, Loader2, Megaphone, CircleDashed, AlertCircle, MessageSquare, UserPlus } from 'lucide-react';
 import { useProfilePicture } from '../hooks/useProfilePicture';
 import { useProfilePictures } from '../hooks/useProfilePictures';
 import { useResolvedPhone } from '../hooks/useResolvedPhone';
@@ -120,7 +120,7 @@ const statusFontStyle = (font?: number): { fontFamily?: string; fontWeight?: num
 export function Chats() {
   const { t } = useTranslation();
   useDocumentTitle(t('nav.chats'));
-  const { error: showErrorToast, warning: showWarningToast } = useToast();
+  const { error: showErrorToast, warning: showWarningToast, success: showSuccessToast } = useToast();
   const { canWrite, engineType } = useRole();
 
   // Sessions list & active session
@@ -272,6 +272,32 @@ export function Chats() {
   );
   const activePhoneText =
     activePhoneDisplay ?? (resolvedPhoneQ.data ? formatPhoneForDisplay(resolvedPhoneQ.data) : null);
+
+  // "Save lead": the server reads the whole stored thread and posts it to the lead.saved webhooks.
+  // The name and phone shown here are passed as hints for what the server cannot derive itself.
+  const [savingLead, setSavingLead] = useState(false);
+  const handleSaveLead = async () => {
+    if (!activeChat || !selectedSessionId || savingLead) return;
+    setSavingLead(true);
+    try {
+      const result = await sessionApi.saveLead(selectedSessionId, activeChat.id, {
+        name: activeChat.name || undefined,
+        phone: resolvedPhoneQ.data ?? undefined,
+      });
+      if (result.webhooks === 0) {
+        showWarningToast(t('chats.saveLeadNoWebhook'));
+      } else {
+        showSuccessToast(
+          t('chats.saveLeadSent', { count: result.webhooks }),
+          result.truncated ? t('chats.saveLeadTruncated', { count: result.messageCount }) : undefined,
+        );
+      }
+    } catch (err) {
+      showErrorToast(t('chats.saveLeadFailed'), err instanceof Error ? err.message : undefined);
+    } finally {
+      setSavingLead(false);
+    }
+  };
 
   // The list loaders below reach the translator and the error toast through a ref, not as
   // dependencies: both change identity on a language switch, which re-ran the session load (it
@@ -1108,6 +1134,18 @@ export function Chats() {
                       {activeChat.id}
                     </span>
                   </div>
+                  {canWrite && (
+                    <button
+                      type="button"
+                      className="btn-secondary room-save-lead"
+                      onClick={handleSaveLead}
+                      disabled={savingLead}
+                      title={t('chats.saveLead')}
+                    >
+                      {savingLead ? <Loader2 size={16} className="animate-spin" /> : <UserPlus size={16} />}
+                      <span>{savingLead ? t('chats.saveLeadSaving') : t('chats.saveLead')}</span>
+                    </button>
+                  )}
                 </header>
 
                 {/* Messages body (list, media, reactions, scroll-to-bottom) — components/chats/ChatThread. */}

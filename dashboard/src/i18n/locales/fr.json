@@ -138,6 +138,12 @@
     "scrollToBottom": "Aller au plus récent",
     "groupSubtitle": "Groupe",
     "privateContactSubtitle": "Contact privé",
+    "saveLead": "Enregistrer le prospect",
+    "saveLeadSaving": "Enregistrement…",
+    "saveLeadSent": "Prospect envoyé à {{count}} webhook(s)",
+    "saveLeadNoWebhook": "Aucun webhook n'est abonné à lead.saved. Ajoutez-en un sur la page Webhooks.",
+    "saveLeadTruncated": "Seuls les {{count}} derniers messages tiennent dans la charge du webhook",
+    "saveLeadFailed": "Impossible d'enregistrer le prospect",
     "deleteConfirm": "Supprimer ce message pour tout le monde ?",
     "promptButtons": "Choix du message",
     "messageDeleted": "🚫 Ce message a été supprimé",
@@ -544,6 +550,7 @@
       "call.rejected": "Lorsqu'un appel est refusé",
       "call.missed": "Lorsqu'un appel reste sans réponse",
       "status.received": "Lorsqu'un contact publie un statut",
+      "lead.saved": "Lorsqu'une discussion est enregistrée comme prospect",
       "all": "Tous les événements"
     },
     "auth": {

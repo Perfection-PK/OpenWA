@@ -24,6 +24,7 @@ import { SettingsModule } from './modules/settings/settings.module';
 import { InfraModule } from './modules/infra/infra.module';
 import { EventsModule } from './modules/events/events.module';
 import { ContactModule } from './modules/contact/contact.module';
+import { LeadModule } from './modules/lead/lead.module';
 import { GroupModule } from './modules/group/group.module';
 import { ProfileModule } from './modules/profile/profile.module';
 import { CallModule } from './modules/call/call.module';
@@ -282,6 +283,7 @@ if (dashboardServingEnabled && dashboardBuildPresent) {
     SettingsModule,
     InfraModule,
     ContactModule,
+    LeadModule, // "Save lead": posts a chat to the lead.saved webhooks
     GroupModule,
     ProfileModule, // Own-profile API (name / status / picture)
     CallModule, // Incoming-call API (reject a ringing call)

@@ -402,6 +402,15 @@
   min-width: 0;
 }
 
+/* "Save lead" sits at the far end of the header, compact so it never squeezes the contact name. */
+.chats-page .room-save-lead {
+  margin-left: auto;
+  flex-shrink: 0;
+  padding: 0.45rem 0.85rem;
+  font-size: 0.85rem;
+  white-space: nowrap;
+}
+
 .chats-page .room-contact-info h3 {
   font-size: 1rem;
   font-weight: 600;
@@ -921,6 +930,11 @@
 
   .chats-page .room-header {
     height: 60px;
+  }
+
+  /* Icon-only on a phone; the button keeps its accessible name through the title. */
+  .chats-page .room-save-lead span {
+    display: none;
   }
 }
 

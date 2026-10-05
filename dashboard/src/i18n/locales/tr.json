@@ -135,6 +135,12 @@
     "scrollToBottom": "En alta kaydır",
     "groupSubtitle": "Grup",
     "privateContactSubtitle": "Özel kişi",
+    "saveLead": "Lead kaydet",
+    "saveLeadSaving": "Kaydediliyor…",
+    "saveLeadSent": "Lead {{count}} webhook'a gönderildi",
+    "saveLeadNoWebhook": "lead.saved olayına abone webhook yok. Webhooks sayfasından ekleyin.",
+    "saveLeadTruncated": "Webhook yüküne yalnızca son {{count}} mesaj sığdı",
+    "saveLeadFailed": "Lead kaydedilemedi",
     "deleteConfirm": "Bu mesaj herkesten silinsin mi?",
     "promptButtons": "Mesaj seçenekleri",
     "messageDeleted": "🚫 Bu mesaj silindi",
@@ -538,6 +544,7 @@
       "call.rejected": "Bir arama reddedildiğinde",
       "call.missed": "Bir arama yanıtsız kaldığında",
       "status.received": "Bir kişi durum paylaştığında",
+      "lead.saved": "Biri bir sohbeti potansiyel müşteri olarak kaydettiğinde",
       "all": "Tüm olaylar"
     },
     "auth": {

@@ -147,6 +147,12 @@
     "scrollToBottom": "انتقل إلى الأحدث",
     "groupSubtitle": "مجموعة",
     "privateContactSubtitle": "جهة اتصال خاصة",
+    "saveLead": "حفظ كعميل محتمل",
+    "saveLeadSaving": "جارٍ الحفظ…",
+    "saveLeadSent": "تم إرسال العميل المحتمل إلى {{count}} webhook",
+    "saveLeadNoWebhook": "لا يوجد webhook مشترك في lead.saved. أضف واحدًا من صفحة Webhooks.",
+    "saveLeadTruncated": "تم تضمين آخر {{count}} رسالة فقط في حمولة webhook",
+    "saveLeadFailed": "تعذر حفظ العميل المحتمل",
     "deleteConfirm": "حذف هذه الرسالة للجميع؟",
     "promptButtons": "خيارات الرسالة",
     "messageDeleted": "🚫 تم حذف هذه الرسالة",
@@ -563,6 +569,7 @@
       "call.rejected": "عند رفض مكالمة",
       "call.missed": "عندما لا يتم الرد على مكالمة",
       "status.received": "عندما تنشر جهة اتصال حالة",
+      "lead.saved": "عندما يحفظ شخص محادثة كعميل محتمل",
       "all": "كل الأحداث"
     },
     "auth": {

@@ -859,6 +859,13 @@ export const sessionApi = {
   getGroups: (id: string) =>
     request<{ id: string; name?: string; linkedParentJID?: string | null }[]>(`/sessions/${id}/groups`),
   getChats: (id: string) => request<Chat[]>(`/sessions/${id}/chats`),
+  // Sends the chat (name, phone, chat id, stored thread) to every webhook subscribed to `lead.saved`.
+  // `webhooks: 0` means nothing was sent because no webhook listens for it.
+  saveLead: (id: string, chatId: string, data: { name?: string; phone?: string }) =>
+    request<{ webhooks: number; messageCount: number; totalMessages: number; truncated: boolean }>(
+      `/sessions/${id}/chats/${encodeURIComponent(chatId)}/lead`,
+      { method: 'POST', body: JSON.stringify(data) },
+    ),
   markChatRead: (id: string, chatId: string) =>
     request<{ success: boolean }>(`/sessions/${id}/chats/read`, {
       method: 'POST',

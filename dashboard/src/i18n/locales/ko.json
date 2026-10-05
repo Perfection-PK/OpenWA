@@ -135,6 +135,12 @@
     "scrollToBottom": "최신으로 이동",
     "groupSubtitle": "그룹",
     "privateContactSubtitle": "개인 연락처",
+    "saveLead": "리드 저장",
+    "saveLeadSaving": "저장 중…",
+    "saveLeadSent": "리드를 webhook {{count}}개로 보냈습니다",
+    "saveLeadNoWebhook": "lead.saved를 구독한 webhook이 없습니다. Webhooks 페이지에서 추가하세요.",
+    "saveLeadTruncated": "최근 메시지 {{count}}개만 webhook 페이로드에 포함되었습니다",
+    "saveLeadFailed": "리드를 저장하지 못했습니다",
     "deleteConfirm": "모두에게서 이 메시지를 삭제할까요?",
     "promptButtons": "메시지 선택지",
     "messageDeleted": "🚫 삭제된 메시지입니다",
@@ -538,6 +544,7 @@
       "call.rejected": "통화가 거절되었을 때",
       "call.missed": "통화에 응답하지 않았을 때",
       "status.received": "연락처가 상태를 게시했을 때",
+      "lead.saved": "누군가 채팅을 리드로 저장했을 때",
       "all": "모든 이벤트"
     },
     "auth": {

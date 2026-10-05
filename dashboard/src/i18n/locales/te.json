@@ -135,6 +135,12 @@
     "scrollToBottom": "తాజాకి స్క్రోల్ చేయండి",
     "groupSubtitle": "సమూహం",
     "privateContactSubtitle": "ప్రైవేట్ పరిచయం",
+    "saveLead": "లీడ్ సేవ్ చేయండి",
+    "saveLeadSaving": "సేవ్ అవుతోంది…",
+    "saveLeadSent": "లీడ్ {{count}} webhookకు పంపబడింది",
+    "saveLeadNoWebhook": "lead.savedకు ఏ webhook సబ్‌స్క్రైబ్ కాలేదు. Webhooks పేజీలో ఒకటి జోడించండి.",
+    "saveLeadTruncated": "webhook పేలోడ్‌లో తాజా {{count}} సందేశాలు మాత్రమే సరిపోయాయి",
+    "saveLeadFailed": "లీడ్‌ను సేవ్ చేయలేకపోయాం",
     "deleteConfirm": "ఈ సందేశాన్ని అందరి కోసం తొలగించాలా?",
     "promptButtons": "సందేశ ఎంపికలు",
     "messageDeleted": "🚫 ఈ సందేశం తొలగించబడింది",
@@ -538,6 +544,7 @@
       "call.rejected": "కాల్ తిరస్కరించబడినప్పుడు",
       "call.missed": "కాల్‌కు ఎవరూ సమాధానం ఇవ్వనప్పుడు",
       "status.received": "కాంటాక్ట్ స్టేటస్ పోస్ట్ చేసినప్పుడు",
+      "lead.saved": "ఎవరైనా చాట్‌ను లీడ్‌గా సేవ్ చేసినప్పుడు",
       "all": "అన్ని ఈవెంట్స్"
     },
     "auth": {

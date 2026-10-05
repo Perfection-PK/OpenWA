@@ -147,6 +147,11 @@ export function generateIdempotencyKey(event: string, data: Record<string, unkno
       // same key (same stability contract as the message.* keys). Scoped by sessionId like `msg_`.
       return `call_${toStr(data.sessionId)}_${toStr(data.callId)}`;
 
+    case 'lead.saved':
+      // Saving the same chat again is a deliberate new submission (the thread has usually grown), so
+      // salt per occurrence: retries of one save stay stable, a second save is delivered again.
+      return `lead_${toStr(data.sessionId)}_${toStr(data.chatId)}${occurrence}`;
+
     default:
       // Fallback: hash entire payload for determinism
       return `evt_${event.replace(/\./g, '_')}_${hashData(data)}`;

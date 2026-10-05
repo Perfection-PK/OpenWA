@@ -135,6 +135,12 @@
     "scrollToBottom": "Gulir ke pesan terbaru",
     "groupSubtitle": "Grup",
     "privateContactSubtitle": "Kontak pribadi",
+    "saveLead": "Simpan lead",
+    "saveLeadSaving": "Menyimpan…",
+    "saveLeadSent": "Lead dikirim ke {{count}} webhook",
+    "saveLeadNoWebhook": "Tidak ada webhook yang berlangganan lead.saved. Tambahkan di halaman Webhooks.",
+    "saveLeadTruncated": "Hanya {{count}} pesan terbaru yang muat dalam payload webhook",
+    "saveLeadFailed": "Gagal menyimpan lead",
     "deleteConfirm": "Hapus pesan ini untuk semua orang?",
     "promptButtons": "Pilihan pesan",
     "messageDeleted": "🚫 Pesan ini telah dihapus",
@@ -538,6 +544,7 @@
       "call.rejected": "Saat panggilan ditolak",
       "call.missed": "Saat panggilan tidak terjawab",
       "status.received": "Saat kontak memposting status",
+      "lead.saved": "Saat seseorang menyimpan chat sebagai lead",
       "all": "Semua kejadian"
     },
     "auth": {

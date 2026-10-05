@@ -141,6 +141,12 @@
     "scrollToBottom": "גלול לאחרון",
     "groupSubtitle": "קבוצה",
     "privateContactSubtitle": "איש קשר פרטי",
+    "saveLead": "שמור כליד",
+    "saveLeadSaving": "שומר…",
+    "saveLeadSent": "הליד נשלח ל-{{count}} webhook",
+    "saveLeadNoWebhook": "אין webhook שרשום ל-lead.saved. הוסף אחד בעמוד Webhooks.",
+    "saveLeadTruncated": "רק {{count}} ההודעות האחרונות נכנסו למטען ה-webhook",
+    "saveLeadFailed": "לא ניתן לשמור את הליד",
     "deleteConfirm": "למחוק הודעה זו עבור כולם?",
     "promptButtons": "אפשרויות ההודעה",
     "messageDeleted": "🚫 הודעה זו נמחקה",
@@ -551,6 +557,7 @@
       "call.rejected": "כאשר שיחה נדחית",
       "call.missed": "כאשר שיחה לא נענית",
       "status.received": "כאשר איש קשר מפרסם סטטוס",
+      "lead.saved": "כאשר מישהו שומר צ׳אט כליד",
       "all": "כל האירועים"
     },
     "auth": {

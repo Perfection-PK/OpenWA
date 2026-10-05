@@ -135,6 +135,12 @@
     "scrollToBottom": "नवीनतम पर स्क्रॉल करें",
     "groupSubtitle": "समूह",
     "privateContactSubtitle": "निजी संपर्क",
+    "saveLead": "लीड सेव करें",
+    "saveLeadSaving": "सेव हो रहा है…",
+    "saveLeadSent": "लीड {{count}} webhook पर भेजी गई",
+    "saveLeadNoWebhook": "कोई webhook lead.saved से सब्सक्राइब नहीं है। Webhooks पेज पर एक जोड़ें।",
+    "saveLeadTruncated": "webhook पेलोड में केवल नवीनतम {{count}} संदेश आ सके",
+    "saveLeadFailed": "लीड सेव नहीं हो सकी",
     "deleteConfirm": "क्या आप यह संदेश सभी के लिए हटाना चाहते हैं?",
     "promptButtons": "संदेश विकल्प",
     "messageDeleted": "🚫 यह संदेश हटा दिया गया था",
@@ -538,6 +544,7 @@
       "call.rejected": "जब कोई कॉल अस्वीकार की जाती है",
       "call.missed": "जब कोई कॉल अनुत्तरित हो जाती है",
       "status.received": "जब कोई संपर्क स्टेटस पोस्ट करता है",
+      "lead.saved": "जब कोई चैट को लीड के रूप में सेव करता है",
       "all": "सभी घटनाएँ"
     },
     "auth": {

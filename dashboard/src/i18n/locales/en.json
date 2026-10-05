@@ -135,6 +135,12 @@
     "scrollToBottom": "Scroll to latest",
     "groupSubtitle": "Group",
     "privateContactSubtitle": "Private contact",
+    "saveLead": "Save lead",
+    "saveLeadSaving": "Saving…",
+    "saveLeadSent": "Lead sent to {{count}} webhook(s)",
+    "saveLeadNoWebhook": "No webhook is subscribed to lead.saved. Add one on the Webhooks page.",
+    "saveLeadTruncated": "Only the latest {{count}} messages fit in the webhook payload",
+    "saveLeadFailed": "Could not save the lead",
     "deleteConfirm": "Delete this message for everyone?",
     "promptButtons": "Message choices",
     "messageDeleted": "🚫 This message was deleted",
@@ -538,6 +544,7 @@
       "call.rejected": "When a call is declined",
       "call.missed": "When a call goes unanswered",
       "status.received": "When a contact posts a status",
+      "lead.saved": "When someone saves a chat as a lead",
       "all": "All events"
     },
     "auth": {

@@ -1061,6 +1061,38 @@ On success the gateway also removes its stored copies of the chat's messages (ro
 
 **Errors:** `400` session not ready · `401` missing/invalid API key · `404` session not found · `409` the session is not connected (engine exists but is not `ready`) · `503` WhatsApp did not answer within the request budget, or the engine’s browser page died — the change may or may not have been applied
 
+#### POST /api/sessions/:sessionId/chats/:chatId/lead
+
+Save a chat as a lead: the gateway collects the chat's name, phone, chat id and its messages and sends them to every active webhook subscribed to `lead.saved` (or `*`). This is what the dashboard's **Save lead** button in the chat header calls.
+
+**Auth:** API key (OPERATOR) · **Scope:** session-scoped, chat-fenced (`:chatId`)
+
+**Path parameters**
+
+| Name        | Type   | Description                                                                |
+| ----------- | ------ | -------------------------------------------------------------------------- |
+| `sessionId` | string | Session UUID                                                               |
+| `chatId`    | string | Chat JID, e.g. `628123456789@c.us`. URL-encode it if your client does not. |
+
+**Body** (all optional)
+
+| Field   | Type   | Description                                                                                                                            |
+| ------- | ------ | -------------------------------------------------------------------------------------------------------------------------------------- |
+| `name`  | string | Name to file the lead under (max 200). Defaults to the latest sender name stored for the chat.                                         |
+| `phone` | string | Phone hint (max 200), used only when the gateway cannot derive one: a `@c.us` id carries it, an `@lid` is resolved through the engine. |
+
+**Response** `200`
+
+```json
+{ "webhooks": 1, "messageCount": 342, "totalMessages": 342, "truncated": false }
+```
+
+`webhooks` is the number of active webhooks the lead was queued for; `0` means nothing was sent because no webhook listens for `lead.saved`. Delivery itself is asynchronous, with the usual signing, retries and delivery-failure log.
+
+The messages are the gateway's stored rows merged with the chat's live WhatsApp history (the same read as `GET .../messages/:chatId/history?deep=true`, up to 2000 messages), deduplicated by message id and sorted oldest first, without media payloads. A stored row wins on a shared id, so live-only messages carry `status: null`. When the live read fails (session not ready, engine without history), only the stored rows are sent. At most 5000 stored rows are read, and the oldest are dropped when the payload would exceed `WEBHOOK_MAX_PAYLOAD_BYTES` (default 1 MiB); `truncated` is `true` whenever fewer than `totalMessages` were sent. See the `lead.saved` row in the webhook event catalog for the payload.
+
+**Errors:** `400` invalid body · `401` missing/invalid API key · `403` role below OPERATOR, or a chat outside the key's `allowedChats` · `404` session not found
+
 #### POST /api/sessions/:sessionId/chats/archive
 
 Archive or unarchive a chat.
@@ -4526,7 +4558,7 @@ Webhooks are configured per session and managed under `/api/sessions/:sessionId/
 
 Two fields — `secret` and `headers` — are **write-only**: they are accepted on create/update but are never returned by any webhook route (the response DTO has no `@Expose` for them, so `fromEntity` drops them). `GET /api/infra/export-data` also omits both from its `webhooks` rows, so a backup no longer carries webhook credentials — a restored webhook comes back unsigned (`secret` null, `headers` `{}`) until you set them again. The `secret` is used to compute the `X-OpenWA-Signature: sha256=<hex>` HMAC-SHA256 header on deliveries.
 
-The `events` array accepts these members plus the `*` wildcard: `message.received`, `message.sent`, `message.ack`, `message.failed`, `message.revoked`, `message.reaction`, `message.edited`, `session.status`, `session.qr`, `session.authenticated`, `session.disconnected`, `session.reconnect_loop`, `session.restriction`, `presence.update`, `call.accepted`, `call.rejected`, `call.missed`, `group.join`, `group.leave`, `group.update`, `group.join_request`, `call.received`, `status.received`. All of them are actively dispatched by at least one engine — none is a reserved placeholder. Four are **Baileys only**, because whatsapp-web.js produces no callback behind them: `presence.update` (its prerequisite `POST .../presence/subscribe` answers `501` there, so this one announces itself) and `call.accepted` / `call.rejected` / `call.missed` (whatsapp-web.js has no call-outcome callback, so these three are accepted on subscribe and then simply never fire). `call.received` is dispatched by both engines but is not reliable on whatsapp-web.js: it fired there in a live test on 2026-09-17 and did not in one on 2026-08-10. See the per-event catalog below for engine scope.
+The `events` array accepts these members plus the `*` wildcard: `message.received`, `message.sent`, `message.ack`, `message.failed`, `message.revoked`, `message.reaction`, `message.edited`, `session.status`, `session.qr`, `session.authenticated`, `session.disconnected`, `session.reconnect_loop`, `session.restriction`, `presence.update`, `call.accepted`, `call.rejected`, `call.missed`, `lead.saved`, `group.join`, `group.leave`, `group.update`, `group.join_request`, `call.received`, `status.received`. All of them are actively dispatched by at least one engine — none is a reserved placeholder. Four are **Baileys only**, because whatsapp-web.js produces no callback behind them: `presence.update` (its prerequisite `POST .../presence/subscribe` answers `501` there, so this one announces itself) and `call.accepted` / `call.rejected` / `call.missed` (whatsapp-web.js has no call-outcome callback, so these three are accepted on subscribe and then simply never fire). `call.received` is dispatched by both engines but is not reliable on whatsapp-web.js: it fired there in a live test on 2026-09-17 and did not in one on 2026-08-10. See the per-event catalog below for engine scope.
 
 #### GET /api/sessions/:sessionId/webhooks
 
@@ -7109,6 +7141,7 @@ These are the events OpenWA actually emits. A webhook is registered with an `eve
 | `call.received`                                   | An incoming voice/video call starts ringing. Dispatched by both engines, but **not reliable on whatsapp-web.js**: it fired in a live test on 2026-09-17 and did not in one on 2026-08-10                                              | `{ callId, from, isVideo, isGroup, timestamp }` — `callId` is the id to pass to `POST /sessions/:sessionId/calls/:callId/reject` (Baileys only). `from` may be an `@lid` privacy id on either engine; resolve it with `GET /api/sessions/:sessionId/contacts/:contactId/phone`                                                                                                                                                                                                                                                                                                                                          |
 | `call.accepted` / `call.rejected` / `call.missed` | A ringing call ended, whether answered, declined, or never picked up. **Baileys only**: whatsapp-web.js emits no call-outcome event                                                                                                   | `{ sessionId, callId, from, outcome, isVideo, isGroup, timestamp }`. `callId` matches the `call.received` that preceded it, so the pair can be correlated. The engines report _what_ happened, never _who_ did it: an accept can come from any linked device. An outcome is only sent for a call this session saw ring, and offline-replayed signalling for calls that ended while disconnected is dropped. WhatsApp's `terminate` is deliberately unmapped: it covers both a caller hanging up before answer and either side ending an answered call, with nothing to tell them apart                                  |
 | `status.received`                                 | A contact posts a status/story (opt-in — see below)                                                                                                                                                                                   | `{ sessionId, statusId, contact: { id, name?, pushName? }, type, caption?, hasMedia, mediaOmitted, omitReason?, postedAt, expiresAt }` — `statusId` is the store's `id` (usable with the status endpoints below); `postedAt`/`expiresAt` are epoch **milliseconds** (unlike the epoch-seconds convention for message timestamps), matching the `GET /status` store's own `Date`-backed fields                                                                                                                                                                                                                           |
+| `lead.saved`                                      | An operator saves a chat as a lead (the dashboard's **Save lead** button, or `POST .../chats/:chatId/lead`). Never fired by WhatsApp traffic                                                                                          | `{ sessionId, chatId, name, phone, isGroup, savedAt, totalMessages, truncated, messageCount, messages[] }`; each message is `{ id, direction, fromMe, from, author, senderName, type, body, mediaMimetype, status, timestamp, createdAt }`, oldest first, without media bytes                                                                                                                                                                                                                                                                                                                                           |
 
 > **`status.received` is opt-in and carries no media blob.** Unlike every other event above, `status.received` is only delivered to a webhook whose `events` list explicitly includes `"status.received"` (or `"*"`) — registering for other events does not implicitly subscribe you to it. The payload never embeds media bytes: when `hasMedia` is `true`, fetch the file separately via `GET /api/sessions/:sessionId/status/:statusId/media`. Your own posted statuses never trigger this event — only inbound stories from contacts (an own-send echo is dropped before ingest).
 
@@ -7194,6 +7227,7 @@ Every delivery includes:
 - `call.accepted` / `call.rejected` / `call.missed`: `call_{sessionId}_{callId}_{outcome}` (each call ends once, so no `occurredAt` salt)
 - `session.restriction`: `restr_{sessionId}_{kind}_{active}_{occurredAt}`
 - `presence.update`: `pres_{sessionId}_{chatId}_{hash(participants)}_{occurredAt}`
+- `lead.saved`: `lead_{sessionId}_{chatId}_{occurredAt}` (saving the same chat again is a new submission)
 - any other event (for example `status.received`): `evt_{event with . replaced by _}_{hash(data)}`
 
 Recurring lifecycle events (and `message.reaction` / `message.edited` / `presence.update`) carry the same content across occurrences — the same phone on every reconnect, a constant disconnect reason, a re-applied emoji, or editing the same message multiple times — so they are salted with an `occurredAt` timestamp captured **once per dispatch and reused across that dispatch's retries**. This gives distinct occurrences distinct keys while keeping retries of one occurrence stable. Message keys are scoped by `sessionId` because WhatsApp message ids are unique per account, not globally.

@@ -135,6 +135,12 @@
     "scrollToBottom": "捲動到最新",
     "groupSubtitle": "群組",
     "privateContactSubtitle": "私人聯絡人",
+    "saveLead": "儲存潛在客戶",
+    "saveLeadSaving": "儲存中…",
+    "saveLeadSent": "潛在客戶已發送至 {{count}} 個 webhook",
+    "saveLeadNoWebhook": "沒有 webhook 訂閱 lead.saved。請在 Webhooks 頁面新增。",
+    "saveLeadTruncated": "webhook 負載中只容納了最新的 {{count}} 則訊息",
+    "saveLeadFailed": "無法儲存潛在客戶",
     "deleteConfirm": "為所有人刪除此訊息？",
     "promptButtons": "訊息選項",
     "messageDeleted": "🚫 此訊息已被刪除",
@@ -538,6 +544,7 @@
       "call.rejected": "來電被拒接時",
       "call.missed": "來電未接聽時",
       "status.received": "聯絡人發佈狀態時",
+      "lead.saved": "有人將聊天儲存為潛在客戶時",
       "all": "所有事件"
     },
     "auth": {

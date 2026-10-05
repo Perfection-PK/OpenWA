@@ -135,6 +135,12 @@
     "scrollToBottom": "滚动到最新",
     "groupSubtitle": "群组",
     "privateContactSubtitle": "私人联系人",
+    "saveLead": "保存线索",
+    "saveLeadSaving": "保存中…",
+    "saveLeadSent": "线索已发送到 {{count}} 个 webhook",
+    "saveLeadNoWebhook": "没有 webhook 订阅 lead.saved。请在 Webhooks 页面添加。",
+    "saveLeadTruncated": "webhook 负载中只容纳了最新的 {{count}} 条消息",
+    "saveLeadFailed": "无法保存线索",
     "deleteConfirm": "为所有人删除此消息？",
     "promptButtons": "消息选项",
     "messageDeleted": "🚫 此消息已被删除",
@@ -538,6 +544,7 @@
       "call.rejected": "来电被拒接时",
       "call.missed": "来电未接听时",
       "status.received": "联系人发布状态时",
+      "lead.saved": "有人将聊天保存为线索时",
       "all": "所有事件"
     },
     "auth": {

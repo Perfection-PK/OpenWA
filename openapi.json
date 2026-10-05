@@ -9131,6 +9131,88 @@
         ]
       }
     },
+    "/api/sessions/{sessionId}/chats/{chatId}/lead": {
+      "post": {
+        "description": "Collects the chat (name, phone, chat id and its messages: stored rows merged with the live WhatsApp history, oldest first) and sends it to every active webhook subscribed to `lead.saved`. Delivery is queued; the response reports how many webhooks it was queued for.",
+        "operationId": "LeadController_saveLead",
+        "parameters": [
+          {
+            "name": "sessionId",
+            "required": true,
+            "in": "path",
+            "description": "Session ID",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "chatId",
+            "required": true,
+            "in": "path",
+            "description": "Chat ID (e.g., 628xxx@c.us)",
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/SaveLeadDto"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Lead collected and queued",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SaveLeadResponseDto"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "The body is malformed, fails validation, or carries a field the DTO does not declare",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "The API key is missing, unknown, revoked, or expired",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "The API key's role, session or chat scope, or IP allow-list does not allow this operation",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          }
+        },
+        "summary": "Save a chat as a lead",
+        "tags": [
+          "leads"
+        ]
+      }
+    },
     "/api/sessions/{sessionId}/groups/join-info": {
       "get": {
         "description": "Read-only: nothing about the account changes, which is what makes it safe to call on a code from an untrusted source. Supported on both engines.\n\nThere is no participant LIST — the account is not a member — only a count, and only when WhatsApp discloses one. Fields the engine does not report are omitted rather than defaulted, because whatsapp-web.js returns an untyped object with no guaranteed shape.",
@@ -18796,6 +18878,7 @@
                 "call.accepted",
                 "call.rejected",
                 "call.missed",
+                "lead.saved",
                 "*"
               ]
             }
@@ -18892,6 +18975,7 @@
                 "call.accepted",
                 "call.rejected",
                 "call.missed",
+                "lead.saved",
                 "*"
               ]
             }
@@ -18991,6 +19075,7 @@
                 "call.accepted",
                 "call.rejected",
                 "call.missed",
+                "lead.saved",
                 "*"
               ]
             }
@@ -22568,6 +22653,48 @@
         "required": [
           "success",
           "message"
+        ]
+      },
+      "SaveLeadDto": {
+        "type": "object",
+        "properties": {
+          "name": {
+            "type": "string",
+            "description": "Display name to file the lead under. Defaults to the latest sender name stored for the chat.",
+            "maxLength": 200
+          },
+          "phone": {
+            "type": "string",
+            "description": "Phone number hint. Used only when the gateway cannot derive one from the chat id itself (a `@c.us` id carries it, an `@lid` id is resolved through the engine).",
+            "maxLength": 200
+          }
+        }
+      },
+      "SaveLeadResponseDto": {
+        "type": "object",
+        "properties": {
+          "webhooks": {
+            "type": "number",
+            "description": "Active webhooks subscribed to `lead.saved` (or `*`) the lead was queued for. 0 means nothing was sent: subscribe a webhook to `lead.saved` first."
+          },
+          "messageCount": {
+            "type": "number",
+            "description": "Messages included in the payload."
+          },
+          "totalMessages": {
+            "type": "number",
+            "description": "Messages known for the chat: stored rows and live history, deduplicated."
+          },
+          "truncated": {
+            "type": "boolean",
+            "description": "True when the oldest messages were left out to keep the payload under the webhook size cap (`WEBHOOK_MAX_PAYLOAD_BYTES`) or the per-lead message ceiling."
+          }
+        },
+        "required": [
+          "webhooks",
+          "messageCount",
+          "totalMessages",
+          "truncated"
         ]
       },
       "GroupJoinInfoDto": {

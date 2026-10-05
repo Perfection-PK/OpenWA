@@ -135,6 +135,12 @@
     "scrollToBottom": "Zur neuesten Nachricht springen",
     "groupSubtitle": "Gruppe",
     "privateContactSubtitle": "Privater Kontakt",
+    "saveLead": "Lead speichern",
+    "saveLeadSaving": "Wird gespeichert…",
+    "saveLeadSent": "Lead an {{count}} Webhook(s) gesendet",
+    "saveLeadNoWebhook": "Kein Webhook hat lead.saved abonniert. Füge auf der Webhooks-Seite einen hinzu.",
+    "saveLeadTruncated": "Nur die letzten {{count}} Nachrichten passen in die Webhook-Nutzlast",
+    "saveLeadFailed": "Lead konnte nicht gespeichert werden",
     "deleteConfirm": "Diese Nachricht für alle löschen?",
     "promptButtons": "Nachrichtenoptionen",
     "messageDeleted": "🚫 Diese Nachricht wurde gelöscht",
@@ -538,6 +544,7 @@
       "call.rejected": "Wenn ein Anruf abgelehnt wird",
       "call.missed": "Wenn ein Anruf unbeantwortet bleibt",
       "status.received": "Wenn ein Kontakt einen Status veröffentlicht",
+      "lead.saved": "Wenn jemand einen Chat als Lead speichert",
       "all": "Alle Ereignisse"
     },
     "auth": {
