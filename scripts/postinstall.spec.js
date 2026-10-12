@@ -34,9 +34,9 @@ const EXPECTED_PATCHER_ORDER = [
   'patch-wwebjs-group-description.js',
   'patch-wwebjs-media-id.js',
   'patch-wwebjs-send-error.js',
-  'patch-wwebjs-download-mimetype.js',
   'patch-baileys-appstate.js',
   'patch-baileys-newsletter-create.js',
+  'patch-baileys-pairing.js',
 ];
 
 /** Bare temp dir optionally holding a dashboard/ and/or the patch scripts. */

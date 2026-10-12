@@ -35,6 +35,7 @@ export function mapEngineHistoryMessage(h: EngineHistoryMessage): ChatMessage {
       }
       if (h.quotedMessage) metadata.quotedMessage = h.quotedMessage;
       if (h.call) metadata.call = h.call;
+      if (h.poll) metadata.poll = h.poll;
       return Object.keys(metadata).length > 0 ? metadata : undefined;
     })(),
   };
@@ -49,14 +50,20 @@ const msgTime = (m: ChatMessage): number =>
 // real delivery status survives. Deduped by the wweb.js serialized id (engine `id` == DB `waMessageId`).
 export function mergeChatMessages(db: ChatMessage[], history: ChatMessage[]): ChatMessage[] {
   const byId = new Map<string, ChatMessage>();
-  for (const m of history) byId.set(msgKey(m), m);
-  for (const m of db) {
+  for (const m of [...history, ...db]) {
     const key = msgKey(m);
     const hist = byId.get(key);
     // The DB copy wins (authoritative status) — but a legacy row has no stable sender id, so
     // salvage the engine-history copy's author or two same-named participants collapse into one
     // attribution run in the chat view.
-    byId.set(key, hist?.author && !m.author ? { ...m, author: hist.author } : m);
+    let merged = hist?.author && !m.author ? { ...m, author: hist.author } : m;
+    if (m.type === 'poll' && !m.metadata?.poll && hist?.metadata?.poll) {
+      merged = { ...merged, metadata: { ...merged.metadata, poll: hist.metadata.poll } };
+    }
+    if (m.type === 'revoked' || hist?.type === 'revoked') {
+      merged = { ...merged, type: 'revoked', body: '', metadata: undefined };
+    }
+    byId.set(key, merged);
   }
   const sorted = [...byId.values()].sort((a, b) => msgTime(a) - msgTime(b) || a.createdAt.localeCompare(b.createdAt));
   return capMediaPayloads(sorted);
@@ -67,7 +74,7 @@ export function mergeChatMessages(db: ChatMessage[], history: ChatMessage[]): Ch
  * React Query cache with staleTime: Infinity, so every image/video/voice note that arrives while
  * the chat is open would otherwise pin its full base64 string in heap for the whole session —
  * scrolling through a media-rich chat grows the tab unboundedly. Past the cap the OLDEST
- * payloads are stripped to the omitted marker ({data: undefined, omitted: true}), which renders
+ * payloads and archived previews are replaced by the omitted marker, which renders
  * the same 📎 placeholder as a history row fetched without media; the newest `keep` stay
  * renderable (thread + lightbox). Count-based (not byte-based): payloads are bounded upstream
  * by the backend's media size cap.
@@ -87,17 +94,23 @@ export const MEDIA_PAYLOAD_CACHE_LIMIT = 100;
  */
 export function capMediaPayloads(list: ChatMessageView[], keep = MEDIA_PAYLOAD_CACHE_LIMIT): ChatMessageView[] {
   let payloadCount = 0;
-  for (const m of list) if (m.metadata?.media?.data) payloadCount++;
+  const retainsMedia = (message: ChatMessageView): boolean => {
+    const media = message.metadata?.media;
+    return Boolean(
+      media?.data || (media?.archived && HISTORY_MEDIA_TYPES.has(message.type) && message.type !== 'document'),
+    );
+  };
+  for (const m of list) if (retainsMedia(m)) payloadCount++;
   if (payloadCount <= keep) return list;
 
   const next = list.slice();
   let toStrip = payloadCount - keep;
   for (let i = 0; i < next.length && toStrip > 0; i++) {
     const media = next[i].metadata?.media;
-    if (!media?.data) continue;
+    if (!media || !retainsMedia(next[i])) continue;
     next[i] = {
       ...next[i],
-      metadata: { ...next[i].metadata, media: { ...media, data: undefined, omitted: true } },
+      metadata: { ...next[i].metadata, media: { ...media, data: undefined, archived: undefined, omitted: true } },
     };
     toStrip--;
   }
@@ -216,6 +229,11 @@ export type MessageMedia = {
   data?: string;
   omitted?: boolean;
   sizeBytes?: number;
+  /**
+   * Set alongside `omitted` when MESSAGE_INLINE_MEDIA=archive dropped the inline copy because the
+   * chat-media archive holds the bytes, the media route serves them, so the thread previews inline.
+   */
+  archived?: boolean;
 };
 
 export const getMediaSrc = (media?: MessageMedia): string => {
@@ -233,6 +251,7 @@ export interface ChatMessageView extends ChatMessage {
     reactions?: Record<string, string>;
     call?: { video: boolean; missed: boolean };
     buttons?: Array<{ id: string; text: string }>;
+    poll?: { name: string; options: string[]; allowMultipleAnswers: boolean };
   };
 }
 
@@ -246,6 +265,7 @@ export function liveMessageMetadata(msg: {
   quotedMessage?: { id: string; body: string };
   call?: { video: boolean; missed: boolean };
   buttons?: Array<{ id: string; text: string }>;
+  poll?: { name: string; options: string[]; allowMultipleAnswers: boolean };
   metadata?: ChatMessageView['metadata'];
 }): ChatMessageView['metadata'] {
   if (msg.metadata) return msg.metadata;
@@ -253,6 +273,7 @@ export function liveMessageMetadata(msg: {
   if (msg.media) metadata.media = msg.media;
   if (msg.quotedMessage) metadata.quotedMessage = msg.quotedMessage;
   if (msg.call) metadata.call = msg.call;
+  if (msg.poll) metadata.poll = msg.poll;
   if (msg.buttons?.length) metadata.buttons = msg.buttons;
   return Object.keys(metadata).length > 0 ? metadata : undefined;
 }
@@ -324,6 +345,8 @@ function mergeMessageMetadata(
   if (call) merged.call = call;
   const buttons = incoming.buttons ?? existing.buttons;
   if (buttons?.length) merged.buttons = buttons;
+  const poll = incoming.poll ?? existing.poll;
+  if (poll) merged.poll = poll;
   return Object.keys(merged).length > 0 ? merged : undefined;
 }
 
@@ -342,7 +365,10 @@ function mergeMessageMetadata(
  */
 export function mergeOrAppend(list: ChatMessageView[], incoming: ChatMessageView): ChatMessageView[] {
   const idx = list.findIndex(m => msgKey(m) === msgKey(incoming));
-  if (idx === -1) return capMediaPayloads([...list, incoming]);
+  if (idx === -1) {
+    const message = incoming.type === 'revoked' ? { ...incoming, body: '', metadata: undefined } : incoming;
+    return capMediaPayloads([...list, message]);
+  }
   const existing = list[idx];
   const next = list.slice();
   next[idx] = {
@@ -352,6 +378,9 @@ export function mergeOrAppend(list: ChatMessageView[], incoming: ChatMessageView
     status: mergeDeliveryStatus(existing.status, incoming.status) ?? incoming.status,
     metadata: mergeMessageMetadata(existing.metadata, incoming.metadata),
   };
+  if (existing.type === 'revoked' || incoming.type === 'revoked') {
+    next[idx] = { ...next[idx], type: 'revoked', body: '', metadata: undefined };
+  }
   return capMediaPayloads(next);
 }
 
@@ -439,7 +468,7 @@ export function applyMessageEdit(
 ): ChatMessageView[] {
   if (!event.messageId) return list;
   const idx = list.findIndex(byMessageId(event.messageId));
-  if (idx === -1) return list;
+  if (idx === -1 || list[idx].type === 'revoked') return list;
   const next = list.slice();
   next[idx] = { ...next[idx], body: event.body };
   return next;

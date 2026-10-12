@@ -100,6 +100,72 @@ private-network proxy sidecar works). The destinations of caller-supplied URLs f
 still vetted by the SSRF guard. Reading the proxy (`GET /api/sessions/:sessionId/proxy`) returns only
 the masked host, type and a `hasCredentials` flag.
 
+### Recovering a lost admin key
+
+Keys are stored as one-way hashes, so a lost key cannot be read back from the database: it is either
+found where it was saved, or replaced. Try these in order. If every key stopped working at once after
+`API_KEY_PEPPER` was set or changed, follow the pepper recovery in §4.4 instead.
+
+1. **The bootstrap key file or `API_MASTER_KEY`.** Whenever `api_keys` is empty (first boot, or
+   after step 4 or the §4.4 pepper reset), the gateway seeds an ADMIN key, set to `API_MASTER_KEY`
+   when that is set, and keeps it in `data/.api-key` (or the `BOOTSTRAP_KEY_FILE` path) until that
+   key is no longer active (revoked, expired or deleted). While the file holds a live key, the
+   startup banner ends with `(full key in <path>)`. Read it with `cat data/.api-key`, with
+   `docker compose exec openwa-api cat /app/data/.api-key` on the compose deployment, or with
+   `kubectl exec openwa-0 -- cat /app/data/.api-key` on the Helm chart (release `openwa`). The key
+   manages keys only while it still meets step 2's conditions. Once it is demoted from `admin`,
+   given any `allowedSessions` or `allowedChats`, or given `allowedIps` that exclude your address,
+   the file and the banner line remain but key management is refused; go on to step 2 or 3.
+
+2. **Another ADMIN key.** Any active, unexpired `admin` key without `allowedSessions` or
+   `allowedChats`, used from an address its `allowedIps` (when set) admits, can manage keys: mint a
+   replacement with `POST /api/auth/api-keys` (`{"name": "Admin", "role": "admin"}`; the raw key is
+   returned once, in `apiKey`), then revoke the lost one with `POST /api/auth/api-keys/:id/revoke`,
+   or do both from the dashboard's API Keys page.
+
+3. **Replace the key in the main database.** With no usable ADMIN key left, give the lost key's row
+   a new key; every other key keeps working. Stop the instance and copy the main database aside. Then
+   generate a key and its hash with the gateway's own hash function and configuration (process env,
+   `.env` and `data/.env.generated`, so the same `API_KEY_PEPPER`). Run it from the gateway's install
+   directory, the one holding `dist/` and `data/`, so it reads that install's configuration. When a
+   service manager (systemd, pm2) sets `API_KEY_PEPPER` only in its unit, export the same value in
+   the shell first, or the hash will not match:
+
+   ```bash
+   GEN="require('./dist/config/load-env'); const key = 'owa_k1_' + require('crypto').randomBytes(32).toString('hex'); console.log('key:', key); console.log('prefix:', key.slice(0, 12)); console.log('hash:', require('./dist/modules/auth/api-key-hash').hashApiKey(key, process.env.API_KEY_PEPPER))"
+   node -e "$GEN"                                               # source install, after npm run build
+   docker compose run --rm --no-deps openwa-api node -e "$GEN"  # compose deployment
+   ```
+
+   Find the row and write the new hash and prefix into it. The main database is
+   `MAIN_DATABASE_NAME`, `data/main.sqlite` by default; on the compose deployment run `sqlite3` as
+   `docker compose run --rm --no-deps openwa-api sqlite3 /app/data/main.sqlite "..."`:
+
+   ```bash
+   sqlite3 data/main.sqlite "SELECT id, name, keyPrefix, isActive, expiresAt FROM api_keys WHERE role = 'admin'"
+   sqlite3 data/main.sqlite "UPDATE api_keys SET keyHash = '<hash>', keyPrefix = '<prefix>', isActive = 1, expiresAt = NULL, allowedIps = NULL, allowedSessions = NULL, allowedChats = NULL WHERE id = '<id>'"
+   ```
+
+   On the Helm chart (release `openwa`), run the generator in the running pod before stopping it,
+   since only that pod has the release's Secret and so its `API_KEY_PEPPER`:
+   `kubectl exec openwa-0 -- node -e "$GEN"`. Then scale the StatefulSet to 0, start the
+   `openwa-restore` helper pod on the release's data PVC as
+   [11 - Runbook: Restore from Backup](./11-operational-runbooks.md#runbook-restore-from-backup)
+   does, copy the database aside and run both `sqlite3` commands there with
+   `kubectl exec openwa-restore --` against `/app/data/main.sqlite`, then delete the pod and scale
+   back to 1.
+
+   Start the instance and use the new key. The update also clears the row's revoked state, expiry,
+   and IP, session and chat restrictions, so it can manage keys again; narrow it afterwards through
+   the API if it carried any. The old key no longer authenticates.
+
+4. **Reset the key table.** When no row is worth keeping, empty `api_keys` as the pepper recovery in
+   §4.4 describes: the next boot seeds a new ADMIN key (from `API_MASTER_KEY` when set) and prints
+   it once. Every other key must then be re-issued.
+
+Keys live in each node's own main database ([13 - Horizontal Scaling](./13-horizontal-scaling.md)),
+so on a multi-node deployment the recovery applies only to the node it ran on.
+
 ## 4.3 IP Whitelisting
 
 IP whitelisting adds an extra security layer by restricting API key access to specific IP addresses.
@@ -196,7 +262,7 @@ OpenWA serves plain HTTP on its port; terminate **TLS at your reverse proxy / lo
 
 **Hardening you can apply today:** set `API_KEY_PEPPER`; restrict the data volume and database to the app's user; and encrypt at the infrastructure layer (LUKS / cloud-provider encrypted volumes / an encrypted managed Postgres) rather than relying on application-level field encryption, which is not implemented.
 
-**Setting or changing `API_KEY_PEPPER` on an existing install invalidates every key, the admin key included.** No stored hash matches any more, minting a key needs a valid ADMIN key, and a key is seeded only into an empty `api_keys` table, so nothing can be re-issued through the API. Set the pepper before first boot. On a running install: stop the instance, set the pepper, empty the table in the main database (the `MAIN_DATABASE_NAME` path, `data/main.sqlite` by default; on a source install `sqlite3 data/main.sqlite "DELETE FROM api_keys"`, on the compose deployment `docker compose run --rm --no-deps openwa-api sqlite3 /app/data/main.sqlite "DELETE FROM api_keys"`), start the instance, take the new ADMIN key from the startup banner or `data/.api-key` (or set `API_MASTER_KEY` beforehand to choose it), then re-issue the other keys.
+**Setting or changing `API_KEY_PEPPER` on an existing install invalidates every key, the admin key included.** No stored hash matches any more, minting a key needs a valid ADMIN key, and a key is seeded only into an empty `api_keys` table, so nothing can be re-issued through the API. Set the pepper before first boot. On a running install: stop the instance, set the pepper, empty the table in the main database (the `MAIN_DATABASE_NAME` path, `data/main.sqlite` by default; on a source install `sqlite3 data/main.sqlite "DELETE FROM api_keys"`, on the compose deployment `docker compose run --rm --no-deps openwa-api sqlite3 /app/data/main.sqlite "DELETE FROM api_keys"`), start the instance, take the new ADMIN key from the startup banner or `data/.api-key` (or set `API_MASTER_KEY` beforehand to choose it), then re-issue the other keys. On the Helm chart, empty the table while the StatefulSet is at 0 from the `openwa-restore` helper pod of [11 - Runbook: Restore from Backup](./11-operational-runbooks.md#runbook-restore-from-backup) (`kubectl exec openwa-restore -- sqlite3 /app/data/main.sqlite "DELETE FROM api_keys"`), delete the pod, and only then set the pepper in the release's Secret (`secretEnv.API_KEY_PEPPER`, or the `existingSecret`) and scale back to 1; a `helm upgrade` that sets the pepper also scales back to `replicaCount`. Read the new key with `kubectl exec openwa-0 -- cat /app/data/.api-key`.
 
 ## 4.5 Input Validation
 
@@ -425,6 +491,15 @@ defaults media above roughly 768 KiB reaches webhooks as the omitted marker. Rai
 with the payload limit at least 4/3 of the inline limit plus room for the envelope. The WebSocket
 gateway applies only the inline limit. Media the engine downloaded stays retrievable from
 `GET /api/sessions/:sessionId/messages/:chatId/:messageId/media` (`404` when nothing was stored).
+
+A `webhook_delivery_failures` row holds no event data by default. With
+`WEBHOOK_FAILURE_PAYLOAD_RETENTION_HOURS` > 0 a terminal row also keeps the pre-hook event data
+(already media-shed, so at most about `WEBHOOK_MEDIA_INLINE_MAX_BYTES` of media) so an ADMIN can
+replay it with `POST /api/webhooks/delivery-failures/redrive`. That is message content at rest in
+the data database: it is cleared once the window passes (checked at startup and then hourly; setting
+the knob back to `0` clears every stored copy on the next start), it is never returned by the list
+route, and `GET /api/infra/export-data` drops it from backups. With the queue enabled each job also
+carries the copy in Redis for the queue's retention window.
 
 ## 4.9 Security Headers
 
@@ -700,7 +775,8 @@ npm audit --json > audit-report.json
 
 ```yaml
 # .github/dependabot.yml, root npm ecosystem only (the file also covers /dashboard,
-# github-actions, docker and docker-compose). The comment above each ignore is omitted here.
+# /sdk/javascript, github-actions, docker and docker-compose). The comment above each
+# ignore is omitted here.
 version: 2
 updates:
   - package-ecosystem: npm
@@ -744,7 +820,7 @@ tar-stream from 3.2.1). Each ignore's reason and lift condition is the comment a
 
 ### Security Scanning in CI
 
-> **Aspirational template — not in the repo.** There is no Snyk and no CodeQL workflow today. The actual dependency check is a dedicated `audit` job ("Security audit") in `ci.yml`, on push/PR. It is deliberately its own job rather than a step inside Lint: an advisory published against an unrelated dependency would otherwise abort the job before ESLint, the type-check and the drift gates ever ran. It runs `npm run check:audit` over the root tree and `npm audit --audit-level=high` over `dashboard/`. Both fence `high` rather than `critical`, because the `overrides` in `package.json` clear the root tree's existing HIGH advisories, so the threshold fences regressions. `check:audit` applies that threshold per advisory instead of all-or-nothing: an advisory with no patched version can be excused by id in `scripts/check-audit.mjs`, with its reason and its removal condition recorded beside it, rather than dropping the whole job to `critical` — and an allowlist entry whose advisory has since gone fails the job too, so an exception cannot outlive its cause. The dashboard keeps the plain form: it has nothing to excuse and stays the stricter of the two. Between releases, `.github/workflows/security-scan.yml` (Scheduled Security Scan) repeats that job every Wednesday at 03:00 UTC and on demand, together with the release Trivy scan against the published `latest` image on amd64 and arm64, and a `base-image-drift` job that fails when the Dockerfile's two `node:22-slim` FROM digests disagree, or when the pin differs from what the tag serves today and either the tag has served that image for 7 or more days, or for 3 or more days with the pin last changed 28 or more days ago. The workflow below is a recommended setup to add if you want Snyk and SAST; its scheduled `npm audit` is already covered by `security-scan.yml`.
+> **Aspirational template, not in the repo.** There is no Snyk and no CodeQL workflow today. The actual dependency check is a dedicated `audit` job ("Security audit") in `ci.yml`, on push/PR. It is deliberately its own job rather than a step inside Lint: an advisory published against an unrelated dependency would otherwise abort the job before ESLint, the type-check and the drift gates ever ran. It runs `npm run check:audit` over the root tree and `npm audit --audit-level=high` over `dashboard/` and `sdk/javascript/`. All three fence `high` rather than `critical`: none of the trees carries a HIGH advisory today (the root reaches that through the `overrides` in `package.json`), so the threshold fences regressions. `check:audit` applies that threshold per advisory instead of all-or-nothing: an advisory with no patched version can be excused by id in `scripts/check-audit.mjs`, with its reason and its removal condition recorded beside it, rather than dropping the whole job to `critical`; an allowlist entry whose advisory has since gone fails the job too, so an exception cannot outlive its cause. The dashboard and the SDK keep the plain form: they have nothing to excuse and stay stricter than the root. Between releases, `.github/workflows/security-scan.yml` (Scheduled Security Scan) repeats that job every Wednesday at 03:00 UTC and on demand, together with the release Trivy scan against the published `latest` image on amd64 and arm64, and a `base-image-drift` job that fails when the Dockerfile's two `node:22-slim` FROM digests disagree, or when the pin differs from what the tag serves today and either the tag has served that image for 7 or more days, or for 3 or more days with the pin last changed 28 or more days ago. The workflow below is a recommended setup to add if you want Snyk and SAST; its scheduled `npm audit` is already covered by `security-scan.yml`.
 
 ```yaml
 # .github/workflows/security.yml

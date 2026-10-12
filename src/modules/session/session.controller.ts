@@ -61,6 +61,7 @@ import {
   ENGINE_NOT_READY_409,
   PAIRING_NOT_READY_409,
   PAIRING_TRANSPORT_503,
+  RECIPIENT_LOOKUP_503,
 } from '../../common/openapi/engine-status-responses';
 
 @ApiTags('sessions')
@@ -325,6 +326,12 @@ export class SessionController {
       'running: the start yields and launches nothing. After a stop or force-kill, a new POST /start ' +
       'clears it and starts the session; after a delete, or an import that removed the session, the ' +
       'retry answers 404.',
+  })
+  @ApiResponse({
+    status: 503,
+    description:
+      "The gateway is shutting down, or the engine's browser or socket connection died during launch and " +
+      'the one automatic retry failed too; no engine is left running, so the start can be retried.',
   })
   @ApiResponse({
     status: 504,
@@ -637,6 +644,7 @@ export class SessionController {
   @ApiResponse({ status: 404, description: 'Session not found' })
   @ApiResponse({ status: 501, description: 'The active engine cannot observe presence (whatsapp-web.js)' })
   @ApiResponse({ status: 409, description: ENGINE_NOT_READY_409 })
+  @ApiResponse({ status: 503, description: RECIPIENT_LOOKUP_503 })
   async subscribeToPresence(
     @Param('sessionId', ParseUUIDPipe) id: string,
     @Body() dto: SubscribePresenceDto,

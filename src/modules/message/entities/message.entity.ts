@@ -40,6 +40,10 @@ export enum MessageStatus {
 // stats reads that filter on chatId without a session. The explicit name matches the migration that
 // creates it on synchronize-disabled deployments, so both schema paths converge on one index.
 @Index('IDX_messages_sessionId_chatId_createdAt', ['sessionId', 'chatId', 'createdAt'])
+// Explicit id tiebreaking keeps a message-time walk stable across SQLite and PostgreSQL.
+@Index('IDX_messages_session_timestamp_id', ['sessionId', 'timestamp', 'id'])
+@Index('IDX_messages_session_chat_timestamp_id', ['sessionId', 'chatId', 'timestamp', 'id'])
+@Index('IDX_messages_session_direction_timestamp_id', ['sessionId', 'direction', 'timestamp', 'id'])
 // Composite index for the ack-driven status UPDATE (scoped by sessionId + waMessageId).
 // Without it every ack does a full table scan of a hot table.
 @Index('UQ_messages_sessionId_waMessageId', ['sessionId', 'waMessageId'], { unique: true })
@@ -101,7 +105,7 @@ export class Message {
    * Storage key of this message's archived media, or null when nothing was archived — which is the
    * case for every row written while `CHAT_MEDIA_ARCHIVE_ENABLED` is off (the default), for non-media
    * messages, and for media above the archive cap. Independent of the inline base64 copy in
-   * `metadata.media`, which is unaffected by archiving.
+   * `metadata.media`, which stays inline by default and is replaced after verification in archive mode.
    */
   // Partial index for the chat-media orphan sweep's per-chunk `mediaPath IN (...)` lookup. NULL for
   // every un-archived row (archiving is opt-in), so the WHERE clause keeps the index to rows that

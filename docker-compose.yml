@@ -49,11 +49,16 @@ services:
       dockerfile: Dockerfile
     container_name: openwa-api
     restart: unless-stopped
-    # Give the graceful drain room to complete before Docker SIGKILLs the container: the shutdown
-    # grace (SHUTDOWN_DELAY_MS, default 3s) plus the worst-case per-engine teardown bound (~10s) can
-    # exceed Docker's 10s default, which would otherwise kill Chromium mid-teardown and orphan a
-    # session profile. Tune down if you raise neither SHUTDOWN_DELAY_MS nor run many sessions.
-    stop_grace_period: 45s
+    # Give the ordered teardown room to finish before Docker SIGKILLs the container, which would cut
+    # Chromium, the usage flush and the database close short. Bounded stages in order: drain 3s
+    # (SHUTDOWN_DELAY_MS) + ingress reconciler 5s + engines 10s + auto-start wait 5s + webhook drain 5s
+    # (WEBHOOK_SHUTDOWN_DRAIN_MS) + usage flush 5s = 33s. An enabled plugin adds 10s. QUEUE_ENABLED and
+    # REDIS_ENABLED add 20s (worker close 10s, producer queue close 2s for each of two queues, three
+    # Redis quits 2s each): 63s worst case. The process force-exits 67s after the drain and 5s before
+    # this deadline. Raising SHUTDOWN_DELAY_MS or WEBHOOK_SHUTDOWN_DRAIN_MS moves that exit later by the
+    # same amount, so raise this by the same amount too. The session count does not add: engines stop
+    # in parallel.
+    stop_grace_period: 75s
     # App network for datastores + the isolated network to reach
     # docker-proxy (DOCKER_HOST). createService() in docker.service.ts attaches
     # orchestrated containers to the literal `openwa-network`, so its name is fixed.
@@ -62,7 +67,7 @@ services:
       - internal-docker
     # Container hardening: Chromium runs with --no-sandbox, so the
     # container itself is the confinement boundary. cap_drop ALL + a minimal re-add
-    # ONLY for the root entrypoint's chown + gosu privilege-drop; once gosu setuids to
+    # for root entrypoint ownership, the gosu drop and init signal forwarding. Once gosu setuids to
     # the openwa user the node/Chromium process keeps NO effective capabilities.
     # read_only rootfs (Chromium's profile lives on the writable /app/data volume;
     # HOME=/tmp + tmpfs absorb stray writes). no-new-privileges blocks setuid escalation.
@@ -74,6 +79,7 @@ services:
       - CHOWN # entrypoint: chown openwa /app/data on the named volume
       - DAC_OVERRIDE # entrypoint: chown across pre-existing files
       - FOWNER
+      - KILL # dumb-init: forward signals to the openwa process after gosu drops uid
       - SETGID # gosu: drop to the openwa group
       - SETUID # gosu: drop to the openwa user
     read_only: true
@@ -201,6 +207,7 @@ services:
       - CHAT_MEDIA_ARCHIVE_OUTBOUND=${CHAT_MEDIA_ARCHIVE_OUTBOUND:-}
       - CHAT_MEDIA_ARCHIVE_MAX_BYTES=${CHAT_MEDIA_ARCHIVE_MAX_BYTES:-}
       - CHAT_MEDIA_ARCHIVE_TTL_DAYS=${CHAT_MEDIA_ARCHIVE_TTL_DAYS:-}
+      - MESSAGE_INLINE_MEDIA=${MESSAGE_INLINE_MEDIA:-}
       - CHAT_MEDIA_ORPHAN_SWEEP_INTERVAL_MS=${CHAT_MEDIA_ORPHAN_SWEEP_INTERVAL_MS:-}
       - CHAT_MEDIA_ORPHAN_GRACE_MS=${CHAT_MEDIA_ORPHAN_GRACE_MS:-}
       # Send pacing (opt-in anti-ban governor). Forwarded explicitly for the same reason as the
@@ -303,6 +310,7 @@ services:
       - WEBHOOK_MAX_PAYLOAD_BYTES=${WEBHOOK_MAX_PAYLOAD_BYTES:-}
       - WEBHOOK_MAX_PER_SESSION=${WEBHOOK_MAX_PER_SESSION:-}
       - WEBHOOK_FAILURE_RETENTION_DAYS=${WEBHOOK_FAILURE_RETENTION_DAYS:-}
+      - WEBHOOK_FAILURE_PAYLOAD_RETENTION_HOURS=${WEBHOOK_FAILURE_PAYLOAD_RETENTION_HOURS:-}
       - WEBHOOK_WORKER_CONCURRENCY=${WEBHOOK_WORKER_CONCURRENCY:-}
       - WEBHOOK_DEGRADED_SESSION_CONCURRENCY=${WEBHOOK_DEGRADED_SESSION_CONCURRENCY:-}
       # Integration Fabric ingress: per-instance fairness, retries, retention, reconciler, workers.
@@ -366,6 +374,7 @@ services:
       - STORAGE_LIST_MAX_FILES=${STORAGE_LIST_MAX_FILES:-}
       - STORAGE_IMPORT_MAX_BYTES=${STORAGE_IMPORT_MAX_BYTES:-}
       - STORAGE_IMPORT_MAX_ENTRIES=${STORAGE_IMPORT_MAX_ENTRIES:-}
+      - STORAGE_IMPORT_MAX_TOTAL_BYTES=${STORAGE_IMPORT_MAX_TOTAL_BYTES:-}
       - STORAGE_EXPORT_TTL_MS=${STORAGE_EXPORT_TTL_MS:-}
       - STORAGE_EXPORT_SWEEP_MAX_AGE_MS=${STORAGE_EXPORT_SWEEP_MAX_AGE_MS:-}
       - S3_REPROBE_INTERVAL_MS=${S3_REPROBE_INTERVAL_MS:-}

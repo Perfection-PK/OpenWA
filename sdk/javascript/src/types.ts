@@ -486,6 +486,16 @@ export interface SendPollRequest {
 }
 
 export interface ListMessagesQuery {
+  type?: MessageType;
+  /** Inclusive message-time lower bound, Unix epoch milliseconds. */
+  since?: number;
+  /** Exclusive message-time upper bound, Unix epoch milliseconds. */
+  until?: number;
+  direction?: MessageDirection;
+  /** Newest first; timestamp excludes rows without known message time. Default createdAt. */
+  orderBy?: 'createdAt' | 'timestamp';
+  /** Exact WhatsApp message reference within the selection. */
+  messageId?: string;
   chatId?: Jid;
   from?: Jid;
   limit?: number;
@@ -623,6 +633,7 @@ export interface ChatHistoryMessage {
     sizeBytes?: number;
   };
   quotedMessage?: { id: string; body: string };
+  poll?: { name: string; options: string[]; allowMultipleAnswers: boolean };
   location?: { latitude: number; longitude: number; description?: string; address?: string; url?: string };
   /** Present on `order` messages only: the placed cart, plus the single-order token for its items. */
   order?: { orderId: string; token?: string };
@@ -632,6 +643,8 @@ export interface ChatHistoryMessage {
 
 /** Paginated payload returned by `GET /sessions/:id/messages`. */
 export interface MessageListResponse {
+  /** Unknown message-time rows in the selected scope; present for time selections only. */
+  unknownTimestampTotal?: number;
   messages: MessageRecord[];
   total: number;
 }
@@ -1030,6 +1043,40 @@ export interface WebhookDeliveryFailure {
   lastError: string;
   /** ISO timestamp of when the row was recorded. */
   createdAt: string;
+  /**
+   * True when the row still holds the event data and can be replayed with
+   * {@link WebhooksResource.redriveDeliveryFailures}: a terminal row (`attempts > 0`) recorded while the
+   * gateway's `WEBHOOK_FAILURE_PAYLOAD_RETENTION_HOURS` is above 0, until that window passes.
+   */
+  replayable: boolean;
+}
+
+/** Body of {@link WebhooksResource.redriveDeliveryFailures}. An empty body takes the least-retried eligible rows. */
+export interface RedriveWebhookDeliveriesRequest {
+  /** Only rows of this session (within the key's allowedSessions). */
+  sessionId?: string;
+  /** Only rows of this webhook. */
+  webhookId?: string;
+  /** Only these failure rows (ids from `deliveryFailures`), at most 500. */
+  ids?: string[];
+  /** Max rows replayed by this call (1-500, default 100). */
+  limit?: number;
+}
+
+/** Outcome of {@link WebhooksResource.redriveDeliveryFailures}. */
+export interface WebhookRedriveResult {
+  /** Rows replayed by this call: delivered plus enqueued. */
+  redriven: number;
+  /** Delivered by a direct POST; their failure rows were removed. */
+  delivered: number;
+  /** Reserved for compatibility; operator redrive always returns zero. */
+  enqueued: number;
+  /** Replays that failed again; their rows stay, with attempts raised by one. */
+  failed: number;
+  /** Rows not replayed: the webhook was removed, disabled or unsubscribed, or a plugin cancelled it. */
+  skipped: number;
+  /** Replayable rows still in scope after this call. */
+  remaining: number;
 }
 
 // ── Chat (session-scoped chat operations) ─────────────────────────
@@ -1041,6 +1088,7 @@ export interface ChatSummary {
   unreadCount: number;
   /** Preview text of the last message (the server returns a plain string, not an object). */
   lastMessage?: string;
+  lastMessageType?: MessageType;
   /** Unix seconds of the last activity. */
   timestamp: number;
   kind: ChatKind;

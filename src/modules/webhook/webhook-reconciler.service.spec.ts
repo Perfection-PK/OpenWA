@@ -1,5 +1,7 @@
+import { ConfigService } from '@nestjs/config';
 import { WebhookReconcilerService, resolveWebhookReconcilerOptions } from './webhook-reconciler.service';
 import { ReplayableDelivery } from './webhook-outbox.service';
+import { MAX_TIMER_MS } from '../../config/configuration';
 
 const OPTS = { intervalMs: 60_000, graceMs: 60_000, batchSize: 50, maxAttempts: 3 };
 
@@ -37,7 +39,12 @@ describe('resolveWebhookReconcilerOptions', () => {
 
 describe('WebhookReconcilerService', () => {
   let outbox: { findStale: jest.Mock; close: jest.Mock; countAttempt: jest.Mock };
-  let delivery: { redeliver: jest.Mock; isLocallyPending: jest.Mock };
+  let delivery: {
+    redeliver: jest.Mock;
+    isLocallyPending: jest.Mock;
+    recordReplayExhaustion: jest.Mock;
+    isQueueJobPending: jest.Mock;
+  };
   let webhooks: { findOne: jest.Mock };
   let service: WebhookReconcilerService;
 
@@ -49,10 +56,14 @@ describe('WebhookReconcilerService', () => {
     };
     delivery = {
       redeliver: jest.fn().mockResolvedValue('delivered'),
+      recordReplayExhaustion: jest.fn().mockResolvedValue(true),
+      isQueueJobPending: jest.fn().mockResolvedValue(false),
       isLocallyPending: jest.fn().mockReturnValue(false),
     };
-    webhooks = { findOne: jest.fn().mockResolvedValue({ id: 'wh-1', active: true, events: ['*'] }) };
-    service = new WebhookReconcilerService(webhooks as never, outbox as never, delivery as never);
+    webhooks = {
+      findOne: jest.fn().mockResolvedValue({ id: 'wh-1', sessionId: 'sess-1', active: true, events: ['*'] }),
+    };
+    service = new WebhookReconcilerService(webhooks as never, outbox as never, delivery as never, new ConfigService());
   });
 
   it('replays a stranded delivery with the STORED idempotency key', async () => {
@@ -63,13 +74,15 @@ describe('WebhookReconcilerService', () => {
     // Deriving a fresh key would make the replay read as a second event at the receiver rather than
     // a retry of the first, which is the whole reason the key is stored rather than recomputed.
     expect(delivery.redeliver).toHaveBeenCalledWith(
-      { id: 'wh-1', active: true, events: ['*'] },
+      { id: 'wh-1', sessionId: 'sess-1', active: true, events: ['*'] },
       'sess-1',
       'message.received',
       'stored-key_wh-1',
       { from: '628123456789@c.us' },
+      { signal: expect.any(AbortSignal) as AbortSignal },
     );
-    expect(outbox.close).toHaveBeenCalledWith('wh-1', 'stored-key_wh-1', 'dispatched');
+    // redeliver retires a delivered event's row itself; a second close here only repeats the write.
+    expect(outbox.close).not.toHaveBeenCalled();
     expect(stats).toMatchObject({ scanned: 1, replayed: 1 });
   });
 
@@ -92,13 +105,13 @@ describe('WebhookReconcilerService', () => {
     expect(stats).toMatchObject({ replayed: 0, failed: 1 });
   });
 
-  it('retires the row when the replay was handed to the queue rather than delivered inline', async () => {
+  it('leaves retirement of an enqueued replay to the worker', async () => {
     outbox.findStale.mockResolvedValue([row({ attempts: 1 })]);
     delivery.redeliver.mockResolvedValue('enqueued');
 
     const stats = await service.sweep(OPTS);
 
-    expect(outbox.close).toHaveBeenCalledWith('wh-1', 'stored-key_wh-1', 'dispatched');
+    expect(outbox.close).not.toHaveBeenCalled();
     expect(stats).toMatchObject({ replayed: 1, failed: 0 });
   });
 
@@ -133,6 +146,23 @@ describe('WebhookReconcilerService', () => {
     expect(delivery.redeliver).not.toHaveBeenCalled();
     expect(outbox.close).toHaveBeenCalledWith('wh-1', 'stored-key_wh-1', 'failed');
     expect(stats).toMatchObject({ failed: 1, replayed: 0 });
+  });
+
+  it('keeps its durable payload when recording a spent budget fails, without another POST', async () => {
+    outbox.findStale.mockResolvedValue([row({ attempts: 3 })]);
+    delivery.recordReplayExhaustion.mockResolvedValue(false);
+    await service.sweep(OPTS);
+    expect(delivery.redeliver).not.toHaveBeenCalled();
+    expect(outbox.close).not.toHaveBeenCalled();
+    expect(delivery.recordReplayExhaustion).toHaveBeenCalledTimes(1);
+  });
+
+  it('keeps a queued row while BullMQ still owns an active job', async () => {
+    outbox.findStale.mockResolvedValue([row({ state: 'queued', deliveryId: 'job' })]);
+    delivery.isQueueJobPending.mockResolvedValue(true);
+    await service.sweep(OPTS);
+    expect(delivery.redeliver).not.toHaveBeenCalled();
+    expect(outbox.close).not.toHaveBeenCalled();
   });
 
   it('does not replay to a subscription that is gone or switched off', async () => {
@@ -198,6 +228,89 @@ describe('WebhookReconcilerService', () => {
 
     expect(second).toEqual({ scanned: 0, replayed: 0, failed: 0, skipped: 0 });
     expect(outbox.findStale).toHaveBeenCalledTimes(1);
+  });
+
+  // A queue lookup against a stalled Redis may not return, and the destroy hooks after this one
+  // (engines, session leases, plugins) must not wait on it for ever.
+  it('stops waiting on destroy after WEBHOOK_SHUTDOWN_DRAIN_MS and replays nothing once the lookup returns', async () => {
+    outbox.findStale.mockResolvedValue([row({ deliveryId: 'job-1' })]);
+    let reached!: () => void;
+    const lookedUp = new Promise<void>(resolve => (reached = resolve));
+    let answer!: (pending: boolean) => void;
+    delivery.isQueueJobPending.mockImplementation(() => {
+      reached();
+      return new Promise<boolean>(resolve => (answer = resolve));
+    });
+    service = new WebhookReconcilerService(
+      webhooks as never,
+      outbox as never,
+      delivery as never,
+      new ConfigService({ webhook: { shutdownDrainMs: 2000 } }),
+    );
+
+    const sweep = service.sweep(OPTS);
+    await lookedUp;
+    let destroyed = false;
+    let destroyedBeforeDeadline: boolean;
+    let destroyedAtDeadline: boolean;
+    jest.useFakeTimers({ doNotFake: ['nextTick', 'setImmediate', 'queueMicrotask'] });
+    try {
+      void service.onModuleDestroy().then(() => (destroyed = true));
+      await jest.advanceTimersByTimeAsync(1999);
+      await new Promise(setImmediate);
+      destroyedBeforeDeadline = destroyed;
+      await jest.advanceTimersByTimeAsync(1);
+      await new Promise(setImmediate);
+      destroyedAtDeadline = destroyed;
+    } finally {
+      jest.useRealTimers();
+    }
+    answer(false);
+    const stats = await sweep;
+
+    expect(destroyedBeforeDeadline).toBe(false);
+    expect(destroyedAtDeadline).toBe(true);
+    expect(stats).toMatchObject({ replayed: 0, failed: 0 });
+    expect(outbox.countAttempt).not.toHaveBeenCalled();
+    expect(delivery.redeliver).not.toHaveBeenCalled();
+    expect(outbox.close).not.toHaveBeenCalled();
+  });
+
+  it('keeps waiting on destroy when WEBHOOK_SHUTDOWN_DRAIN_MS is above the Node timer ceiling', async () => {
+    outbox.findStale.mockResolvedValue([row({ deliveryId: 'job-1' })]);
+    let reached!: () => void;
+    const lookedUp = new Promise<void>(resolve => (reached = resolve));
+    let answer!: (pending: boolean) => void;
+    delivery.isQueueJobPending.mockImplementation(() => {
+      reached();
+      return new Promise<boolean>(resolve => (answer = resolve));
+    });
+    service = new WebhookReconcilerService(
+      webhooks as never,
+      outbox as never,
+      delivery as never,
+      new ConfigService({ webhook: { shutdownDrainMs: MAX_TIMER_MS + 1 } }),
+    );
+
+    const sweep = service.sweep(OPTS);
+    await lookedUp;
+    let destroyed = false;
+    let destroyedEarly: boolean;
+    jest.useFakeTimers({ doNotFake: ['nextTick', 'setImmediate', 'queueMicrotask'] });
+    try {
+      void service.onModuleDestroy().then(() => (destroyed = true));
+      await jest.advanceTimersByTimeAsync(60_000);
+      await new Promise(setImmediate);
+      destroyedEarly = destroyed;
+    } finally {
+      jest.useRealTimers();
+    }
+    answer(false);
+    await sweep;
+    await new Promise(setImmediate);
+
+    expect(destroyedEarly).toBe(false);
+    expect(destroyed).toBe(true);
   });
 
   it('does not start a timer when the interval disables it', () => {

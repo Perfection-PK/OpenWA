@@ -526,9 +526,13 @@ The gateway still stores and emits each chat's messages in arrival order: the `m
 `message:sent` chains run concurrently, but the row insert, the websocket event, `message:persisted` and
 the start of webhook dispatch wait for every earlier message of the same chat. A slow handler therefore
 delays that chat's later messages, by at most its 5 s hook timeout (`SANDBOX_HOOK_TIMEOUT_MS`) for a
-sandboxed plugin. Webhook dispatch itself is not ordered: its queue jobs and HTTP deliveries run
-concurrently, so a receiver that needs order should sort by the message's `data.timestamp`. That value is
-whole seconds from WhatsApp, so messages sent within the same second cannot be put back in order.
+sandboxed plugin. On PostgreSQL a chat's `message:received` and `message:sent` chains also start in
+arrival order. A handler registered in-process that never settles also holds the media slots of its
+message, so once `INBOUND_MEDIA_CONCURRENCY` slots are stuck the session's media arrives with the omitted
+marker (see [12 - Troubleshooting & FAQ](./12-troubleshooting-faq.md)). Webhook dispatch itself is not
+ordered: its queue jobs and HTTP deliveries run concurrently, so a receiver that needs order should sort
+by the message's `data.timestamp`. That value is whole seconds from WhatsApp, so messages sent within the
+same second cannot be put back in order.
 
 ## 19.6 Plugin Loader
 
@@ -579,11 +583,18 @@ double-enable, and engines must match the configured active engine):
 
 **Disable / unload / uninstall.** `disablePlugin` runs `onDisable` (force-terminating the worker for a
 sandboxed plugin, even if `onDisable` hangs or throws) and unregisters the plugin's hooks. `onModuleDestroy`
-disables every enabled plugin on graceful shutdown so stateful plugins can flush. `uninstallPlugin`
-disables + unloads, drops the registry entry, and deletes the plugin's directory and its `ctx.storage`
-data dir (built-ins are protected and cannot be uninstalled). The unload path dispatches `onUnload`:
-for a sandboxed plugin it runs in the worker between `onDisable` and terminate (a plain disable does
-NOT fire `onUnload` — disable is reversible and its cleanup hook is `onDisable`).
+disables every enabled plugin on graceful shutdown so stateful plugins can flush. Plugins are disabled
+in parallel, so the order of `onDisable` across plugins is unspecified and a handler must not rely on
+another plugin still being enabled. Running plugins go first; then it waits for enables already in
+flight (a sandboxed enable is three 30 s-bounded calls) and disables those plugins too. The whole
+phase, waits included, is capped at 10 s; a plugin still running at the cap is terminated with the
+process. New enables are refused once teardown starts. A disable that arrives while the same plugin is
+still being disabled (shutdown overlapping a REST disable, an uninstall or an update unload) joins the
+running teardown, so `onDisable` runs once; an unload that joins this way gets no worker-side `onUnload`.
+`uninstallPlugin` disables + unloads, drops the registry entry, and deletes the plugin's directory and
+its `ctx.storage` data dir (built-ins are protected and cannot be uninstalled). The unload path
+dispatches `onUnload`: for a sandboxed plugin it runs in the worker between `onDisable` and terminate
+(a plain disable does NOT fire `onUnload`; disable is reversible and its cleanup hook is `onDisable`).
 
 **Context.** `createPluginContext` builds the `PluginContext` (§19.4): a per-plugin logger,
 `registerHook` (wrapped with the per-session activation gate), `registerWebhook`, the live

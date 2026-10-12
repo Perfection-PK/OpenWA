@@ -22,13 +22,14 @@
 # Usage:
 #   ./scripts/backup.sh
 # Environment:
-#   MAIN_DATABASE_NAME  auth/audit SQLite file (default: ./data/main.sqlite)
-#   DATABASE_NAME       data-store SQLite file (default: ./data/openwa.sqlite; sqlite only)
+#   MAIN_DATABASE_NAME  auth/audit SQLite file (default: <data dir>/main.sqlite)
+#   DATABASE_NAME       data-store SQLite file (default: <data dir>/openwa.sqlite; sqlite only)
 #                       Both resolve EXACTLY like the app: the environment first, then ./.env, then
-#                       <data dir>/.env.generated, otherwise the fixed ./data default (see
-#                       lib-env.sh). They are NOT derived from OPENWA_DATA_DIR — the app never does
-#                       that either.
-#   OPENWA_DATA_DIR   data directory for the non-DB state below (default: ./data)
+#                       <data dir>/.env.generated, otherwise the app's ./data default (see
+#                       lib-env.sh).
+#   OPENWA_DATA_DIR   the app's ./data directory, such as a volume's mountpoint on the host
+#                     (default: ./data); the ./data defaults, and a ./data/... path read from ./.env
+#                     or .env.generated, are taken under it
 #   BACKUP_DIR        where archives are written (default: ./backups)
 #   DATABASE_TYPE     sqlite (default) | postgres
 #   SESSION_DATA_PATH, BAILEYS_AUTH_DIR, STORAGE_LOCAL_PATH, PLUGINS_DIR
@@ -43,6 +44,13 @@
 #                     other local users can read in the process list, so leave the password out of
 #                     it and supply PGPASSWORD or ~/.pgpass instead; the DATABASE_* path already
 #                     passes DATABASE_PASSWORD through PGPASSWORD.
+#   DATABASE_SSL, DATABASE_SSL_REJECT_UNAUTHORIZED
+#                     pg_dump makes the app's TLS check: sslmode=verify-full against the CA roots
+#                     Node trusts (NODE_EXTRA_CA_CERTS included), or require when the second is
+#                     false. Without node it uses sslrootcert=system, which needs libpq 16+ and a
+#                     system CA store. PGSSLMODE and PGSSLROOTCERT, when set, take precedence.
+#                     verify-full also matches the host pg_dump connects to, DATABASE_URL's
+#                     included, against the certificate, so name the host the certificate carries.
 #
 # Failure policy: a missing source database is FATAL (no silent empty backup), and the finished
 # archive must contain every configured database or it is deleted and the run fails. When the
@@ -71,29 +79,33 @@ DATABASE_TYPE="$(openwa_resolve DATABASE_TYPE sqlite)"
 TIMESTAMP="$(date +%Y%m%d-%H%M%S)"
 
 # Database paths resolve exactly like the app: an explicit environment value wins, then ./.env, then
-# the dashboard's <data dir>/.env.generated, otherwise the fixed ./data default. OPENWA_DATA_DIR
-# below only bases the non-DB state directories — deriving DB paths from it would back up files the
-# app never reads.
-MAIN_DB="$(openwa_resolve MAIN_DATABASE_NAME ./data/main.sqlite)"
-DATA_DB="$(openwa_resolve DATABASE_NAME ./data/openwa.sqlite)"
-SESSIONS_DIR="$(openwa_resolve SESSION_DATA_PATH "$DATA_DIR/sessions")"
-BAILEYS_DIR="$(openwa_resolve BAILEYS_AUTH_DIR "$DATA_DIR/baileys")"
+# the dashboard's <data dir>/.env.generated, otherwise the app's ./data default. That default, like
+# the state directories below, is relative to the app's working directory, so it is taken under
+# OPENWA_DATA_DIR: on the host, the cwd's ./data is not the one the app writes.
+MAIN_DB="$(openwa_resolve MAIN_DATABASE_NAME "${DATA_DIR%/}/main.sqlite" path)"
+# With DATABASE_TYPE=postgres, DATABASE_NAME names the database instead, read below only when pg_dump
+# needs it, so a line for it the scripts cannot parse stops only a backup that uses it.
+if [ "$DATABASE_TYPE" != "postgres" ]; then
+  DATA_DB="$(openwa_resolve DATABASE_NAME "${DATA_DIR%/}/openwa.sqlite" path)"
+fi
+SESSIONS_DIR="$(openwa_resolve SESSION_DATA_PATH "$DATA_DIR/sessions" path)"
+BAILEYS_DIR="$(openwa_resolve BAILEYS_AUTH_DIR "$DATA_DIR/baileys" path)"
 MEDIA_DIR="$(openwa_media_dir)"
 # Installed plugin code. The app defaults this to <dataDir>/plugins — the same tree as the
 # registry and each plugin's ctx.storage below — so an unset PLUGINS_DIR must resolve there
 # too, or the archive silently omits the plugin packages.
-PLUGIN_PACKAGES_DIR="$(openwa_resolve PLUGINS_DIR "$DATA_DIR/plugins")"
+PLUGIN_PACKAGES_DIR="$(openwa_resolve PLUGINS_DIR "$DATA_DIR/plugins" path)"
 # Plugin registry + every plugin's persisted ctx.storage. The app puts them at <dataDir>/plugins,
 # where dataDir is PLUGIN_STATE_DIR when that is set and ./data otherwise, so the knob has to be
 # resolved here exactly like PLUGINS_DIR above. Hardcoding $DATA_DIR/plugins meant an operator who
 # moved plugin state got an archive with neither the registry nor any plugin's storage in it, and
 # a restore that put nothing back. Resolved under its own name because the knob names the ROOT,
 # not the plugins directory inside it.
-PLUGIN_STATE_ROOT="$(openwa_resolve PLUGIN_STATE_DIR "$DATA_DIR")"
+PLUGIN_STATE_ROOT="$(openwa_resolve PLUGIN_STATE_DIR "$DATA_DIR" path)"
 PLUGIN_STATE_DIR="$PLUGIN_STATE_ROOT/plugins"
 GENERATED_ENV="$DATA_DIR/.env.generated"
 # The app writes the generated admin key to BOOTSTRAP_KEY_FILE when that is set.
-ADMIN_KEY_FILE="$(openwa_resolve BOOTSTRAP_KEY_FILE "$DATA_DIR/.api-key")"
+ADMIN_KEY_FILE="$(openwa_resolve BOOTSTRAP_KEY_FILE "$DATA_DIR/.api-key" path)"
 
 log() { echo "[backup] $*"; }
 
@@ -208,17 +220,56 @@ if [ "$DATABASE_TYPE" = "postgres" ]; then
     log "ERROR: DATABASE_TYPE=postgres but pg_dump is not installed"
     exit 1
   fi
+  # libpq defaults to sslmode=prefer, which falls back to plaintext and accepts any certificate, so
+  # the dump sent the database password past the TLS check the app makes. Apply the app's check:
+  # verify the server against the CA roots Node trusts (the image has no system CA store), or only
+  # encrypt when DATABASE_SSL_REJECT_UNAUTHORIZED=false. An operator's PGSSLMODE or PGSSLROOTCERT wins.
+  # Each key is resolved on its own line, where set -e stops the run on a line the scripts cannot
+  # parse; inside a `[` test that failure would be ignored and pg_dump would connect as if the line
+  # were absent.
+  PG_SSL=false
+  if [ -z "${PGSSLMODE:-}" ]; then
+    PG_SSL="$(openwa_resolve DATABASE_SSL false)"
+  fi
+  if [ "$PG_SSL" = true ]; then
+    PG_SSL_REJECT="$(openwa_resolve DATABASE_SSL_REJECT_UNAUTHORIZED true)"
+    if [ "$PG_SSL_REJECT" = false ]; then
+      export PGSSLMODE=require
+    else
+      if [ -z "${PGSSLROOTCERT:-}" ] && command -v node >/dev/null 2>&1; then
+        PG_ROOT_CERTS="$(mktemp)"
+        trap 'rm -rf "$STAGE" "$PG_ROOT_CERTS"' EXIT
+        # Before Node 22.15 there is no getCACertificates, and rootCertificates holds only the bundled
+        # roots, so NODE_EXTRA_CA_CERTS is added from its file. An unreadable file is skipped, as Node
+        # itself skips it after the warning it prints at startup.
+        node -e 'const tls = require("tls");
+          let certs = tls.getCACertificates ? tls.getCACertificates("default") : tls.rootCertificates;
+          if (!tls.getCACertificates && process.env.NODE_EXTRA_CA_CERTS) {
+            try { certs = certs.concat(require("fs").readFileSync(process.env.NODE_EXTRA_CA_CERTS, "utf8")); } catch {}
+          }
+          console.log(certs.join("\n"))' \
+          >"$PG_ROOT_CERTS"
+      elif [ -z "${PGSSLROOTCERT:-}" ]; then
+        log "node not found: verifying the server against the system CA store (sslrootcert=system," \
+          "libpq 16+); set PGSSLROOTCERT to a CA file if pg_dump cannot use it"
+      fi
+      export PGSSLMODE=verify-full PGSSLROOTCERT="${PGSSLROOTCERT:-${PG_ROOT_CERTS:-system}}"
+    fi
+  fi
   DATABASE_URL_RESOLVED="$(openwa_resolve DATABASE_URL '')"
   if [ -n "$DATABASE_URL_RESOLVED" ]; then
     pg_dump "$DATABASE_URL_RESOLVED" >"$STAGE/database.sql"
   else
     # Same layered resolution as the paths above: a dashboard-provisioned Postgres keeps its
-    # connection details in <data dir>/.env.generated, never in the operator's shell.
-    PGPASSWORD="$(openwa_resolve DATABASE_PASSWORD '')" pg_dump \
-      -h "$(openwa_resolve DATABASE_HOST localhost)" \
-      -p "$(openwa_resolve DATABASE_PORT 5432)" \
-      -U "$(openwa_resolve DATABASE_USERNAME openwa)" \
-      "$(openwa_resolve DATABASE_NAME openwa)" >"$STAGE/database.sql"
+    # connection details in <data dir>/.env.generated, never in the operator's shell. Each is
+    # resolved on its own line, where set -e stops the run on a value the scripts cannot read; inside
+    # the pg_dump arguments that failure would be ignored and the default dumped instead.
+    PG_PASSWORD="$(openwa_resolve DATABASE_PASSWORD '')"
+    PG_HOST="$(openwa_resolve DATABASE_HOST localhost)"
+    PG_PORT="$(openwa_resolve DATABASE_PORT 5432)"
+    PG_USER="$(openwa_resolve DATABASE_USERNAME openwa)"
+    PG_NAME="$(openwa_resolve DATABASE_NAME openwa)"
+    PGPASSWORD="$PG_PASSWORD" pg_dump -h "$PG_HOST" -p "$PG_PORT" -U "$PG_USER" "$PG_NAME" >"$STAGE/database.sql"
   fi
   REQUIRED_MEMBERS+=("./database.sql")
 else
@@ -253,7 +304,13 @@ if [ -d "$BAILEYS_DIR" ]; then
   if [ -n "$(find -H "$BAILEYS_DIR" -mindepth 1 -maxdepth 1 -type d -print -quit)" ]; then
     record_engine_state_note "baileys/ (recorded whenever Baileys state exists; it cannot show whether it was live)"
   fi
-elif [ "$(openwa_resolve ENGINE_TYPE '')" = "baileys" ]; then
+# The warning is advisory, so an ENGINE_TYPE line the scripts cannot parse skips it instead of the backup,
+# and its error is reported as a warning. A failed lookup prints nothing on stdout and a successful one
+# nothing on stderr, so both share the substitution.
+elif ! ENGINE_TYPE_RESOLVED="$(openwa_resolve ENGINE_TYPE '' 2>&1)"; then
+  sed -e 's/^\[config\] ERROR: /[config] WARN: /' -e 's/^\[config\]        /[config]       /' <<<"$ENGINE_TYPE_RESOLVED" >&2
+  log "WARN: ENGINE_TYPE could not be read (see above); skipping only the check for missing Baileys state"
+elif [ "$ENGINE_TYPE_RESOLVED" = "baileys" ]; then
   log "WARN: ENGINE_TYPE=baileys but $BAILEYS_DIR was not found — restored sessions will require pairing"
 fi
 

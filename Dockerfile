@@ -191,7 +191,7 @@ COPY package*.json ./
 # scripts/postinstall.js rides along so a bare local `npm ci` keeps working, but the
 # --ignore-scripts install below skips the hook here: the explicit fatal run right
 # after is the sole (and stricter) applier for the image.
-COPY scripts/postinstall.js scripts/patch-wwebjs-201832.js scripts/wwebjs-201832.patch scripts/patch-wwebjs-newsletter-preview.js scripts/patch-wwebjs-status.js scripts/patch-wwebjs-ready-sync.js scripts/patch-wwebjs-participant-arity.js scripts/patch-wwebjs-block.js scripts/patch-wwebjs-group-description.js scripts/patch-wwebjs-media-id.js scripts/patch-wwebjs-send-error.js scripts/patch-wwebjs-download-mimetype.js scripts/patch-baileys-appstate.js scripts/patch-baileys-newsletter-create.js ./scripts/
+COPY scripts/postinstall.js scripts/patch-wwebjs-201832.js scripts/wwebjs-201832.patch scripts/patch-wwebjs-newsletter-preview.js scripts/patch-wwebjs-status.js scripts/patch-wwebjs-ready-sync.js scripts/patch-wwebjs-participant-arity.js scripts/patch-wwebjs-block.js scripts/patch-wwebjs-group-description.js scripts/patch-wwebjs-media-id.js scripts/patch-wwebjs-send-error.js scripts/patch-baileys-appstate.js scripts/patch-baileys-newsletter-create.js scripts/patch-baileys-pairing.js ./scripts/
 
 # Install production dependencies only, then apply the backports. The status patcher runs after
 # the two patchers it depends on: its transforms were written against the tree they leave behind.
@@ -219,9 +219,9 @@ RUN npm ci --omit=dev --ignore-scripts \
     && node scripts/patch-wwebjs-group-description.js \
     && node scripts/patch-wwebjs-media-id.js \
     && node scripts/patch-wwebjs-send-error.js \
-    && node scripts/patch-wwebjs-download-mimetype.js \
     && node scripts/patch-baileys-appstate.js \
     && node scripts/patch-baileys-newsletter-create.js \
+    && node scripts/patch-baileys-pairing.js \
     && npm cache clean --force
 
 # Replace the npm the base image bundles. npm is not on the request path — the entrypoint runs
@@ -302,9 +302,12 @@ RUN chmod +x /usr/local/bin/docker-entrypoint.sh
 # Expose port
 EXPOSE 2785
 
-# Health check
+# Probe the port the app binds: PORT from the container environment, else the app's own default.
+# The probe shell sees only that environment, never a PORT set in a file the app loads (a mounted
+# .env or data/.env.generated), so a non-default PORT must be passed with -e/--env. Shell form on
+# purpose: exec form would not expand it.
 HEALTHCHECK --interval=30s --timeout=10s --start-period=30s --retries=3 \
-    CMD curl -f http://localhost:2785/api/health/ready || exit 1
+    CMD curl -f "http://localhost:${PORT:-2785}/api/health/ready" || exit 1
 
 # dumb-init is PID 1 and handles signal forwarding.
 # It execs docker-entrypoint.sh (as root), which fixes volume ownership and

@@ -1,6 +1,6 @@
 import type * as BaileysLib from '@whiskeysockets/baileys';
-import type { Chat, Contact as BaileysContact, WAMessage, WASocket } from '@whiskeysockets/baileys';
-import { EngineEventCallbacks, IncomingMessage } from '../interfaces/whatsapp-engine.interface';
+import type { Chat, Contact as BaileysContact, WAMessage, WAMessageKey, WASocket } from '@whiskeysockets/baileys';
+import { EngineEventCallbacks, IncomingMessage, MessageType } from '../interfaces/whatsapp-engine.interface';
 import {
   BAILEYS_NON_CONTENT_TYPES,
   buildIncomingMessageFromBaileys,
@@ -8,6 +8,7 @@ import {
   extractBaileysButtonReply,
   extractBaileysButtons,
   extractBaileysCommerce,
+  extractBaileysPoll,
   isBaileysCatalogShare,
 } from './baileys-message-mapper';
 import { BAILEYS_QUERY_BUDGET_MS, withQueryDeadline } from './baileys-query-deadline';
@@ -28,7 +29,9 @@ export interface BaileysHistoryHost {
   /** Lazily loaded @whiskeysockets/baileys module (ESM-only; loaded on first connect, not at boot). */
   loadLib(): Promise<typeof BaileysLib>;
   /** Seed the chat's last-message preview + sort time from a history/live message. */
-  recordMessage(msg: WAMessage): void;
+  recordMessage(msg: WAMessage, type?: MessageType): void;
+  recordMessageEdit(chatId: string, messageId: string, text: string, type?: MessageType): void;
+  applyHistoryRevoke(target: WAMessageKey, envelope: WAMessageKey): Promise<WAMessageKey | undefined>;
   upsertContacts(records: Partial<BaileysContact>[]): void;
   upsertChats(records: Partial<Chat>[]): void;
   /**
@@ -104,6 +107,8 @@ export class BaileysHistory {
     const b = await this.host.loadLib();
     const nameUpdates: { id: string; notify: string }[] = [];
     const mapped: IncomingMessage[] = [];
+    const revokes: { message: WAMessage; target: WAMessageKey }[] = [];
+    const targets = new Map(messages.filter(msg => msg.key?.id).map(msg => [msg.key.id!, msg]));
     for (const msg of messages) {
       if (msg.key?.fromMe !== true && msg.pushName) {
         const sender = msg.key?.participant ?? msg.key?.remoteJid;
@@ -111,20 +116,60 @@ export class BaileysHistory {
           nameUpdates.push({ id: sender, notify: msg.pushName });
         }
       }
-      // Seed the chat's last-message preview + sort time (newest wins); else history-only chats
-      // would read "No messages yet".
-      this.host.recordMessage(msg);
       const incoming = this.mapHistoryMessage(b, msg);
       if (incoming) {
         mapped.push(incoming);
+      } else if (msg.key?.remoteJid) {
+        const content = b.normalizeMessageContent(msg.message) ?? msg.message;
+        const protocol = content?.protocolMessage;
+        if (protocol && protocol.type === b.proto.Message.ProtocolMessage.Type.REVOKE && protocol.key?.id) {
+          revokes.push({ message: msg, target: protocol.key });
+        }
       }
+    }
+    // Targets can precede or follow their revokes, including across separate history chunks.
+    for (const { message, target } of revokes) {
+      const original = targets.get(target.id!);
+      const key = await this.host.applyHistoryRevoke(
+        original?.key ?? { ...target, remoteJid: target.remoteJid ?? message.key.remoteJid },
+        message.key,
+      );
+      if (!key?.remoteJid) continue;
+      const cleared = this.revokedMessage(key, toUnixSeconds(original?.messageTimestamp ?? message.messageTimestamp));
+      mapped.push(cleared);
     }
     if (nameUpdates.length) {
       this.host.upsertContacts(nameUpdates);
     }
     if (mapped.length) {
-      this.host.getOnHistoryMessages()?.(mapped);
+      const storedRevokes = await this.host.getOnHistoryMessages()?.(mapped);
+      const revoked = (storedRevokes ?? mapped).filter(m => m.type === 'revoked');
+      const revokedKeys = new Set(revoked.map(m => JSON.stringify([m.id, m.chatId, m.fromMe])));
+      for (const incoming of mapped) {
+        if (incoming.type === 'revoked') continue;
+        const original = targets.get(incoming.id)!;
+        const deleted = revokedKeys.has(JSON.stringify([incoming.id, incoming.chatId, incoming.fromMe]));
+        this.host.recordMessage(original, deleted ? 'revoked' : incoming.type);
+      }
+      for (const m of revoked) this.host.recordMessageEdit(m.chatId, m.id, '', 'revoked');
     }
+  }
+
+  private revokedMessage(key: WAMessageKey, timestamp: number): IncomingMessage {
+    const message = buildIncomingMessageFromBaileys(
+      {
+        id: key.id!,
+        remoteJid: key.remoteJid!,
+        fromMe: key.fromMe === true,
+        participant: key.participant ?? undefined,
+        body: '',
+        contentType: undefined,
+        timestamp,
+        selfJid: this.host.normalizedSelfJid(),
+      },
+      jid => this.host.toNeutralJid(jid),
+    );
+    return { ...message, type: 'revoked' };
   }
 
   /**
@@ -272,6 +317,7 @@ export class BaileysHistory {
         // Same commerce mapping as the live path, so a whole-catalog share is `unknown` on both.
         order: commerce.order,
         product: commerce.product,
+        poll: extractBaileysPoll(content),
         button,
         buttons,
         isCatalogShare: isBaileysCatalogShare(content),

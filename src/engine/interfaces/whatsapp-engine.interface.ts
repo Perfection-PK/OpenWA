@@ -187,6 +187,7 @@ export interface IncomingMessage {
   backgroundColor?: string;
   /** Styling of a text status/story: the WhatsApp font index. Only set by engines that expose it. */
   font?: number;
+  poll?: PollDetails;
   media?: {
     mimetype: string;
     filename?: string;
@@ -388,6 +389,13 @@ export interface LocationInput extends Quotable {
   address?: string;
 }
 
+/** Poll choices as received from the engine, without vote counts. */
+export interface PollDetails {
+  name: string;
+  options: string[];
+  allowMultipleAnswers: boolean;
+}
+
 export interface PollInput extends Quotable {
   /** Poll question / title. */
   name: string;
@@ -553,6 +561,8 @@ export interface ChatSummary {
   unreadCount: number;
   timestamp: number;
   lastMessage?: string;
+  /** Engine-neutral type of the last message, when available. */
+  lastMessageType?: MessageType;
   /** Archived state, as set via `POST /sessions/{sessionId}/chats/archive`. */
   archived: boolean;
   /** Pinned state, as set via `POST /sessions/{sessionId}/chats/pin`. */
@@ -786,20 +796,57 @@ export interface CallOutcomeEvent {
   timestamp: number;
 }
 
+/**
+ * A message's place in its session from the moment it arrives until its row is written (see
+ * `EngineEventCallbacks.admitInbound`). The engine hands it back with the message it emits.
+ */
+export interface InboundTicket {
+  /**
+   * Room for one downloaded payload: true once granted, false when the message asked for none, or
+   * when no room came free in time (the media then goes out with the omitted marker, undownloaded).
+   * Call it right before the download, never earlier: the grant is held until the row is written.
+   */
+  reserve: () => boolean | Promise<boolean>;
+  /** Keep the room until `p` settles too: work on the payload that may outlive the emit. */
+  holdUntil: (p: Promise<unknown>) => void;
+  /** The message will not be emitted: release its turn and its room. A no-op after the emit. */
+  drop: () => void;
+  /**
+   * Whether the session recorded a delete for everyone of this message while holding it, so emitting
+   * it stores the row cleared and announces nothing. False for a revoke the session never saw.
+   */
+  readonly revoked: boolean;
+}
+
 export interface EngineEventCallbacks {
   onQRCode?: (qr: string) => void;
   onReady?: (phone: string, pushName: string) => void;
-  onMessage?: (message: IncomingMessage) => void;
+  /**
+   * Set only where a downloaded payload outlives the emit (PostgreSQL writes asynchronously). The
+   * engine calls it synchronously as each live message arrives, in arrival order, and passes the
+   * ticket to the emit, or drops it when the message is not emitted. `needsRoom` says whether the
+   * message will download media; `status` marks a status post. Undefined when the engine is stale.
+   */
+  admitInbound?: (arrival: {
+    id: string;
+    chatId: string;
+    needsRoom: boolean;
+    status: boolean;
+  }) => InboundTicket | undefined;
+  onMessage?: (message: IncomingMessage, ticket?: InboundTicket) => void;
   /**
    * Fired for messages the account itself created (outgoing) — including sends composed on a
    * linked phone, which the `message`/`onMessage` event never delivers. Used to emit `message.sent`.
    */
-  onMessageCreate?: (message: IncomingMessage) => void;
+  onMessageCreate?: (message: IncomingMessage, ticket?: InboundTicket) => void;
   /**
    * Fired when the delivery status of an outgoing message advances. The adapter maps its native
    * delivery signal to the neutral `DeliveryStatus`, so consumers never see engine-specific codes.
+   * `chatId` is the conversation the acked message belongs to, canonicalized the same way the
+   * inbound mappers canonicalize `IncomingMessage.chatId`; undefined when the engine's update
+   * carries no chat, and the emitted payload then omits the field rather than guess.
    */
-  onMessageAck?: (messageId: string, status: DeliveryStatus) => void;
+  onMessageAck?: (messageId: string, status: DeliveryStatus, chatId?: string) => void;
   onMessageRevoked?: (message: RevokedMessage) => void;
   onMessageReaction?: (event: ReactionEvent) => void;
   onMessageEdited?: (message: EditedMessage) => void;
@@ -818,8 +865,9 @@ export interface EngineEventCallbacks {
   /**
    * Bulk historical messages from an engine's initial sync (e.g. Baileys `messaging-history.set`).
    * They predate the live session, so consumers persist them for the chat view but must not dispatch.
+   * An async consumer may return stored revocations to keep previews cleared across resyncs.
    */
-  onHistoryMessages?: (messages: IncomingMessage[]) => void;
+  onHistoryMessages?: (messages: IncomingMessage[]) => void | Promise<IncomingMessage[] | void>;
   onDisconnected?: (reason: string) => void;
   /**
    * Fired each time the engine schedules an INTERNAL reconnect attempt: a drop it retries on its own

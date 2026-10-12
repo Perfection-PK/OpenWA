@@ -281,6 +281,16 @@ describe('WebhooksResource — exact paths', () => {
     await client(t).webhooks.create('s', { url: 'u', events: ['message.received'], filters });
     expect(t.lastCall!.body).toEqual({ url: 'u', events: ['message.received'], filters });
   });
+
+  it('redriveDeliveryFailures POSTs the filter (or an empty body) to the redrive route', async () => {
+    const result = { redriven: 1, delivered: 1, enqueued: 0, failed: 0, skipped: 0, remaining: 0 };
+    const t = new MockTransport().on('POST', /\/api\/webhooks\/delivery-failures\/redrive$/, { body: result });
+    const c = client(t);
+    await expect(c.webhooks.redriveDeliveryFailures({ sessionId: 's', limit: 10 })).resolves.toEqual(result);
+    expect(t.lastCall!.body).toEqual({ sessionId: 's', limit: 10 });
+    await c.webhooks.redriveDeliveryFailures();
+    expect(t.lastCall!.body).toEqual({});
+  });
 });
 
 describe('StatusResource — nested media bodies', () => {
@@ -370,6 +380,17 @@ describe('ChatsResource — exact paths', () => {
     await c.chats.delete('s', { chatId: 'a@c.us' });
     await c.chats.sendState('s', { chatId: 'a@c.us', state: 'typing' });
     expect(t.lastCall!.url).toContain('/chats/typing');
+  });
+});
+
+describe('ChatsResource last-message metadata', () => {
+  it('keeps media types and omitted metadata from the server response', async () => {
+    const t = new MockTransport().on('GET', /\/chats$/, {
+      body: [{ id: 'photo@c.us', lastMessageType: 'image' }, { id: 'empty@c.us' }],
+    });
+    const chats = await client(t).chats.list('s');
+    expect(chats[0].lastMessageType).toBe('image');
+    expect(chats[1].lastMessageType).toBeUndefined();
   });
 });
 

@@ -8,11 +8,13 @@ import {
   OnApplicationBootstrap,
   OnModuleDestroy,
   OnModuleInit,
+  ServiceUnavailableException,
 } from '@nestjs/common';
 import { createLogger } from '../../common/services/logger.service';
+import { ShutdownService } from '../../common/services/shutdown.service';
 import { ConfigService } from '@nestjs/config';
 import { InjectRepository } from '@nestjs/typeorm';
-import { In, Not, QueryDeepPartialEntity, Repository } from 'typeorm';
+import { In, IsNull, Not, QueryDeepPartialEntity, Repository } from 'typeorm';
 import { createHash, randomUUID } from 'crypto';
 import { setTimeout } from 'node:timers/promises';
 import {
@@ -120,6 +122,8 @@ export class BulkMessageService implements OnModuleInit, OnApplicationBootstrap,
   private readonly logger = createLogger(BulkMessageService.name);
   private readonly processingBatches = new Map<string, boolean>(); // Track active batches for cancellation
   private inFlightBatches = 0; // count of batches currently in processBatch (memory bound, see cap above)
+  /** Set at the top of onModuleDestroy: no batch may start sending once the shutdown fail has run. */
+  private shuttingDown = false;
 
   constructor(
     @InjectRepository(MessageBatch, 'data')
@@ -137,6 +141,10 @@ export class BulkMessageService implements OnModuleInit, OnApplicationBootstrap,
     // below. Absent in direct-construction unit tests, which then fall back to the shared default.
     @Optional()
     private readonly configService?: ConfigService,
+    // The drain signal, set when shutdown begins and SHUTDOWN_DELAY_MS before onModuleDestroy. Only
+    // new batches are refused on it: one accepted before the drain runs until the teardown fails it.
+    @Optional()
+    private readonly shutdownService?: ShutdownService,
   ) {}
 
   /**
@@ -186,8 +194,10 @@ export class BulkMessageService implements OnModuleInit, OnApplicationBootstrap,
    * TypeORM closes the database (onApplicationShutdown). The row is read first so the FAILED write strips
    * its stored media payloads, as every other terminal path does. The marker is cleared only once the
    * row is FAILED, so a run stops at its next item and records what it sent under that status.
+   * A batch whose row is still being written here is not found; the flag makes its pickup fail it.
    */
   async onModuleDestroy(): Promise<void> {
+    this.shuttingDown = true;
     for (const id of [...this.processingBatches.keys()]) {
       try {
         const row = await this.batchRepository.findOne({ where: { id } });
@@ -313,6 +323,13 @@ export class BulkMessageService implements OnModuleInit, OnApplicationBootstrap,
       throw new BadRequestException(`Batch ID '${batchId}' already exists`);
     }
 
+    // Refused from the start of the drain: a batch accepted then would be failed part-sent when the
+    // teardown runs. Checked in the same turn as the registration below: a create that passes here is
+    // either seen by the shutdown fail or failed at its pickup in processBatch.
+    if (this.shuttingDown || this.shutdownService?.isShuttingDown() === true) {
+      throw new ServiceUnavailableException('The server is shutting down; retry the batch shortly');
+    }
+
     // Reject before persisting a row when too many batches are already processing, so a burst can't
     // hold an unbounded number of full message sets (base64 media included) in memory at once.
     const maxConcurrentBatches = resolveMaxConcurrentBatches();
@@ -377,9 +394,30 @@ export class BulkMessageService implements OnModuleInit, OnApplicationBootstrap,
     );
 
     // Start processing asynchronously
-    this.processBatch(batch.id, true).catch(err => {
+    const pickup = this.processBatch(batch.id, true).catch(err => {
       this.logger.error(`Batch ${batchId} processing error: ${String(err)}`);
     });
+    // Teardown began during the save, so the pickup only fails the row. Awaited here, because the
+    // HTTP server's close waits for this request and the database closes after it; a detached write
+    // could find the connection gone and leave the row PENDING. Nothing was sent, so the row is then
+    // deleted and the answer is a 503: a retry of the same batchId (an SDK replaying the 503) is not
+    // refused as a duplicate of a batch that never ran. Only this process drives the batch, and the
+    // guard on startedAt keeps any row that began sending.
+    if (this.shuttingDown) {
+      await pickup;
+      const freed = await this.batchRepository.delete({ id: batch.id, startedAt: IsNull() }).then(
+        result => Boolean(result.affected),
+        (error: unknown) => {
+          this.logger.error(`Could not delete unsent batch ${batchId} on shutdown: ${String(error)}`);
+          return false;
+        },
+      );
+      throw new ServiceUnavailableException(
+        freed
+          ? 'The server is shutting down; retry the batch shortly'
+          : `The server is shutting down; batch '${batchId}' was not sent. Retry it shortly under a new batch ID`,
+      );
+    }
 
     return batch;
   }
@@ -460,6 +498,13 @@ export class BulkMessageService implements OnModuleInit, OnApplicationBootstrap,
       // executeBatch closes the remaining race (a cancel committing after this read).
       if (this.processingBatches.get(batch.id) === false || batch.status === BatchStatus.CANCELLED) {
         this.logger.log(`Batch ${batch.batchId} was cancelled before processing started; nothing was sent`);
+        return;
+      }
+      // Saved while the shutdown fail ran, which could not see the row yet: fail it unsent rather
+      // than start a run after this process began tearing down.
+      if (this.shuttingDown) {
+        await this.failOrphanedBatch(batch);
+        this.logger.warn(`Batch ${batch.batchId} was failed before processing started: shutting down`);
         return;
       }
       this.processingBatches.set(batch.id, true);

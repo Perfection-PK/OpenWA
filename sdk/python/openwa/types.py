@@ -486,7 +486,9 @@ class SendPollRequest(TypedDict):
 ListMessagesQuery = TypedDict(
     "ListMessagesQuery",
     # ``after`` is a keyset cursor: the id of the last message of the previous page.
-    {"chatId": Jid, "from": Jid, "limit": int, "offset": int, "after": str, "inlineMedia": bool},
+    {"chatId": Jid, "from": Jid, "limit": int, "offset": int, "after": str, "inlineMedia": bool,
+     "since": float, "until": float, "direction": Literal["incoming", "outgoing"],
+     "orderBy": Literal["createdAt", "timestamp"], "type": str, "messageId": str},
     total=False,
 )
 
@@ -592,6 +594,12 @@ class MessageContact(TypedDict, total=False):
     labels: list
 
 
+class ChatHistoryPoll(TypedDict):
+    name: str
+    options: list[str]
+    allowMultipleAnswers: bool
+
+
 # A message read live from WhatsApp by ``messages.history()`` — the engine
 # payload, richer and differently shaped than the persisted MessageRecord.
 ChatHistoryMessage = TypedDict(
@@ -619,6 +627,7 @@ ChatHistoryMessage = TypedDict(
         "font": NotRequired[int],
         "media": NotRequired[ChatHistoryMedia],
         "quotedMessage": NotRequired[QuotedMessage],
+        "poll": NotRequired[ChatHistoryPoll],
         "location": NotRequired[MessageLocation],
         "order": NotRequired[MessageOrder],
         "product": NotRequired[MessageProduct],
@@ -629,6 +638,7 @@ ChatHistoryMessage = TypedDict(
 class MessageListResponse(TypedDict):
     """Paginated payload returned by ``GET /sessions/:id/messages``."""
 
+    unknownTimestampTotal: NotRequired[int]
     messages: list[MessageRecord]
     total: int
 
@@ -993,6 +1003,40 @@ class WebhookDeliveryFailure(TypedDict):
     lastError: str
     # ISO timestamp of when the failure was first recorded.
     createdAt: str
+    # True when the row still holds the event data and can be replayed with
+    # WebhooksResource.redrive_delivery_failures: a terminal row (attempts > 0) recorded while the
+    # gateway's WEBHOOK_FAILURE_PAYLOAD_RETENTION_HOURS is above 0, until that window passes.
+    replayable: bool
+
+
+class RedriveWebhookDeliveriesRequest(TypedDict, total=False):
+    """Body of ``WebhooksResource.redrive_delivery_failures``. An empty body takes the least-retried eligible rows."""
+
+    # Only rows of this session (within the key's allowedSessions).
+    sessionId: str
+    # Only rows of this webhook.
+    webhookId: str
+    # Only these failure rows (ids from delivery_failures), at most 500.
+    ids: list[str]
+    # Max rows replayed by this call (1-500, default 100).
+    limit: int
+
+
+class WebhookRedriveResult(TypedDict):
+    """Outcome of ``WebhooksResource.redrive_delivery_failures``."""
+
+    # Rows replayed by this call: delivered plus enqueued.
+    redriven: int
+    # Delivered by a direct POST; their failure rows were removed.
+    delivered: int
+    # Reserved for compatibility; operator redrive always returns zero.
+    enqueued: int
+    # Replays that failed again; their rows stay, with attempts raised by one.
+    failed: int
+    # Rows not replayed: the webhook was removed, disabled or unsubscribed, or a plugin cancelled it.
+    skipped: int
+    # Replayable rows still in scope after this call.
+    remaining: int
 
 
 # ── Chat ──────────────────────────────────────────────────────────
@@ -1005,6 +1049,7 @@ class ChatSummary(TypedDict):
     unreadCount: int
     # Server returns a plain preview string, not a message object.
     lastMessage: NotRequired[str]
+    lastMessageType: NotRequired[MessageType]
     timestamp: int
     kind: ChatKind
     archived: bool

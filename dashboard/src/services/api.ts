@@ -255,6 +255,7 @@ export interface Chat {
   unreadCount: number;
   timestamp: number;
   lastMessage?: string;
+  lastMessageType?: MessageType;
   archived: boolean;
   pinned: boolean;
   muted: boolean;
@@ -316,7 +317,16 @@ export interface ChatMessage {
   timestamp?: number;
   createdAt: string;
   metadata?: {
-    media?: { mimetype: string; filename?: string; data?: string; omitted?: boolean; sizeBytes?: number };
+    poll?: { name: string; options: string[]; allowMultipleAnswers: boolean };
+    media?: {
+      mimetype: string;
+      filename?: string;
+      data?: string;
+      omitted?: boolean;
+      sizeBytes?: number;
+      /** With `omitted`: the inline copy was dropped because the chat-media archive holds the bytes. */
+      archived?: boolean;
+    };
     quotedMessage?: { id: string; body: string };
     reactions?: Record<string, string>;
     call?: { video: boolean; missed: boolean };
@@ -378,7 +388,9 @@ export interface EngineHistoryMessage {
     data?: string;
     omitted?: boolean;
     sizeBytes?: number;
+    archived?: boolean;
   };
+  poll?: { name: string; options: string[]; allowMultipleAnswers: boolean };
   quotedMessage?: { id: string; body: string };
   location?: { latitude: number; longitude: number; description?: string; address?: string; url?: string };
   /** Present on `order` messages only: the placed cart, plus the single-order token for its items. */
@@ -728,15 +740,24 @@ export interface SearchResults {
 // fails; the never-settling promise halts this request's chain so callers neither flash a generic
 // error toast nor receive an undefined payload while the page navigates away. Otherwise throw an
 // Error carrying the HTTP status and, when the gateway supplied one, its machine code.
-async function handleErrorResponse<T>(response: Response): Promise<T> {
+// `sentKey` is the key the request carried (null when none). Logout aborts nothing in flight, so an
+// answer can arrive after the stored key changed. With a key sent but none stored, a sign-out is
+// already under way (an earlier failure of the same burst, or the user on the login form): stay
+// silent and do not navigate again. A request sent without a key comes only from a chain that
+// outlived a logout (the dashboard shows the login form whenever no key is stored), so with none
+// stored it stays silent too rather than reloading the login form under the user. With another key
+// stored, the answer speaks for a key no longer in use and must not sign out the current one, so it
+// fails like any other error.
+async function handleErrorResponse<T>(response: Response, sentKey: string | null): Promise<T> {
   // On a non-JSON body (e.g. a reverse-proxy 502/503/504 HTML page) fall through to `HTTP <status>`
   // rather than statusText: the toast folds an exact `HTTP 502`/`HTTP 503` into its connection-lost
   // toast (a 504 keeps its own), and statusText is empty over HTTP/2 anyway.
   const error = await response.json().catch(() => ({}));
-  if (isKeyUnusable(response.status, error.message)) {
+  const storedKey = sessionStorage.getItem('openwa_api_key');
+  if (isKeyUnusable(response.status, error.message) && (storedKey === sentKey || storedKey === null)) {
     sessionStorage.removeItem('openwa_api_key');
     if (typeof window !== 'undefined') {
-      window.location.assign('/');
+      if (sentKey !== null && storedKey === sentKey) window.location.assign('/');
       return new Promise<T>(() => {});
     }
   }
@@ -772,7 +793,7 @@ async function request<T>(endpoint: string, options: RequestInit = {}): Promise<
   const response = await fetch(url, { ...options, headers });
 
   if (!response.ok) {
-    return handleErrorResponse<T>(response);
+    return handleErrorResponse<T>(response, apiKey);
   }
 
   if (response.status === 204) {
@@ -790,14 +811,14 @@ async function requestText(endpoint: string): Promise<string> {
   });
 
   if (!response.ok) {
-    return handleErrorResponse<string>(response);
+    return handleErrorResponse<string>(response, apiKey);
   }
 
   return response.text();
 }
 
 /** Like {@link request} but returns a Blob — e.g. for status media downloads. */
-async function requestBlob(endpoint: string): Promise<Blob> {
+async function requestBlob(endpoint: string, signal?: AbortSignal): Promise<Blob> {
   const url = `${API_BASE_URL}${endpoint}`;
 
   // Get API key from sessionStorage for authentication
@@ -807,10 +828,10 @@ async function requestBlob(endpoint: string): Promise<Blob> {
     ...(apiKey ? { 'X-API-Key': apiKey } : {}),
   };
 
-  const response = await fetch(url, { headers });
+  const response = await fetch(url, { headers, signal });
 
   if (!response.ok) {
-    return handleErrorResponse<Blob>(response);
+    return handleErrorResponse<Blob>(response, apiKey);
   }
 
   return response.blob();
@@ -893,8 +914,11 @@ export const sessionApi = {
   // MESSAGE_LIST_INLINE_MEDIA_BUDGET_BYTES; past that budget the payload arrives as the
   // `{ omitted: true, sizeBytes }` marker and the bytes are only reachable here. Served as an
   // attachment (Content-Disposition), so callers download it rather than rendering it inline.
-  getMessageMediaBlob: (id: string, chatId: string, messageId: string) =>
-    requestBlob(`/sessions/${id}/messages/${encodeURIComponent(chatId)}/${encodeURIComponent(messageId)}/media`),
+  getMessageMediaBlob: (id: string, chatId: string, messageId: string, signal?: AbortSignal) =>
+    requestBlob(
+      `/sessions/${id}/messages/${encodeURIComponent(chatId)}/${encodeURIComponent(messageId)}/media`,
+      signal,
+    ),
   getSubscribedChannels: (id: string) => request<Channel[]>(`/sessions/${id}/channels`),
   getChannelMessages: (id: string, channelId: string, limit = 50) =>
     request<ChannelMessage[]>(`/sessions/${id}/channels/${encodeURIComponent(channelId)}/messages?limit=${limit}`),

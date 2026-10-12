@@ -1,5 +1,7 @@
 # @rmyndharis/openwa
 
+This document describes `main`. Send idempotency, webhook failure redrive, message-window filters, poll choices, and last-message types are unreleased additions after SDK 0.5.1 and require the corresponding server changes after OpenWA 0.24.0.
+
 Official JavaScript/TypeScript SDK for [OpenWA](https://github.com/rmyndharis/OpenWA), the open-source WhatsApp API Gateway. OpenWA is an independent project, not affiliated with or endorsed by WhatsApp or Meta.
 
 Ships dual CJS + ESM builds with bundled type declarations.
@@ -118,10 +120,24 @@ Cutting a release:
 2. Tag that commit `js-sdk-v<version>` (e.g. `js-sdk-v0.5.1`) and push the tag.
    The SDK has its own version line — the monorepo's `v*` tags are the app
    version and never trigger an SDK publish.
-3. The workflow re-runs the SDK's tests, typecheck, build and dual CJS/ESM
-   smoke check, then publishes. The published tarball is the one those gates
-   passed, not a later rebuild.
+3. The workflow audits the SDK lockfile (`npm audit --audit-level=high`),
+   re-runs the SDK's tests, typecheck, build and dual CJS/ESM smoke check
+   (packaging plus requests through each build's client), then publishes.
+   The published tarball is the one those gates passed, not a later
+   rebuild.
 
 ## License
 
 MIT
+
+## Send idempotency
+
+The example below requires the unreleased SDK changes on `main`; SDK 0.5.1 does not expose this per-send key argument. The server must also include the send idempotency changes after OpenWA 0.24.0.
+
+Supply a unique caller-owned key for one logical send and reuse it when retrying that same call. Keys contain 1-255 visible ASCII characters; unrelated calls must use different keys. The SDK forwards the key without changing its retry policy or generating one automatically.
+
+```javascript
+await client.messages.sendText(sessionId, { chatId: '628123@c.us', text: 'Hello' }, 'order-123');
+```
+
+The gateway supports text, image, video, audio, document, sticker, location, contact, template, poll, reply and forward sends. Completed calls replay their response; pending or uncertain outcomes return 409, and a changed request with the same key returns 422. The gateway retains keys for 24 hours. Bulk, product and button operations have no such guarantee. Omit the key to preserve existing behavior.

@@ -52,6 +52,7 @@ describe('MessageProjector', () => {
     emitMessageReaction: jest.Mock;
   };
   let webhookService: { dispatch: jest.Mock };
+  let hookManager: { execute: jest.Mock };
   let engines: EngineRegistry;
   let engine: IWhatsAppEngine;
   let projector: MessageProjector;
@@ -70,6 +71,7 @@ describe('MessageProjector', () => {
       emitMessageReaction: jest.fn(),
     };
     webhookService = { dispatch: jest.fn().mockResolvedValue(undefined) };
+    hookManager = { execute: jest.fn().mockResolvedValue(undefined) };
     engines = new EngineRegistry();
     engine = {} as IWhatsAppEngine;
     engines.set('s1', engine);
@@ -79,7 +81,7 @@ describe('MessageProjector', () => {
       engines,
       eventsGateway as unknown as EventsGateway,
       webhookService as unknown as WebhookService,
-      { execute: jest.fn().mockResolvedValue(undefined) } as unknown as HookManager,
+      hookManager as unknown as HookManager,
       {} as unknown as StatusStoreService,
       { resolveSenderPhone: jest.fn().mockResolvedValue(null) } as unknown as SessionLidResolver,
     );
@@ -203,7 +205,12 @@ describe('MessageProjector', () => {
       const payload = dispatchPayload(webhookService.dispatch);
       expect(payload.reactions).toEqual({ '627@c.us': '❤️', '628@c.us': '👍' });
       expect(messageRepository.update).toHaveBeenCalledWith(
-        { sessionId: 's1', waMessageId: 'WA1' },
+        expect.objectContaining({
+          sessionId: 's1',
+          waMessageId: 'WA1',
+          type: Not('revoked'),
+          metadata: expect.anything() as unknown,
+        }),
         { metadata: { reactions: { '627@c.us': '❤️', '628@c.us': '👍' } } },
       );
     });
@@ -244,6 +251,40 @@ describe('MessageProjector', () => {
   });
 
   describe('persistHistoryMessages', () => {
+    it('updates plugin indexes after a history revoke without dispatching live events', async () => {
+      const row = {
+        id: 'db-id',
+        waMessageId: 'WA1',
+        chatId: 'c1@c.us',
+        direction: MessageDirection.INCOMING,
+        type: 'revoked',
+        body: '',
+        metadata: null,
+        timestamp: 1_700_000_000,
+      };
+      messageRepository.find.mockResolvedValueOnce([{ waMessageId: 'WA1', type: 'text' }]).mockResolvedValueOnce([row]);
+      const builder = {
+        insert: jest.fn().mockReturnThis(),
+        values: jest.fn().mockReturnThis(),
+        orIgnore: jest.fn().mockReturnThis(),
+        execute: jest.fn().mockResolvedValue({}),
+      };
+      Object.assign(messageRepository, { createQueryBuilder: jest.fn().mockReturnValue(builder) });
+      hookManager.execute.mockRejectedValueOnce(new Error('index unavailable'));
+      const result = await projector.persistHistoryMessages('s1', engine, [
+        historyMessage({ type: 'revoked', fromMe: false, body: '' }),
+      ]);
+      await settle();
+      expect(result).toEqual([expect.objectContaining({ id: 'WA1', type: 'revoked', body: '' })]);
+      expect(hookManager.execute).toHaveBeenCalledWith(
+        'message:persisted',
+        { sessionId: 's1', message: row },
+        { sessionId: 's1', source: 'SessionService' },
+      );
+      expect(webhookService.dispatch).not.toHaveBeenCalled();
+      expect(eventsGateway.emitMessage).not.toHaveBeenCalled();
+    });
+
     it('skips rows that cannot become a valid message row, and queries nothing when none survive', async () => {
       await projector.persistHistoryMessages('s1', engine, [
         historyMessage({ id: '' }), // no id -> cannot de-dup
@@ -281,7 +322,7 @@ describe('MessageProjector', () => {
       expect(dedupIds(messageRepository.find)).toEqual(['DUP']);
     });
 
-    it('skips history older than the MESSAGE_RETENTION_DAYS window', async () => {
+    it('checks old history for revocation without reinserting content outside retention', async () => {
       const prev = process.env.MESSAGE_RETENTION_DAYS;
       process.env.MESSAGE_RETENTION_DAYS = '30';
       try {
@@ -293,7 +334,8 @@ describe('MessageProjector', () => {
           historyMessage({ id: 'NEW', timestamp: nowSec - 29 * 86_400 }),
         ]);
 
-        expect(dedupIds(messageRepository.find)).toEqual(['NEW']);
+        expect(dedupIds(messageRepository.find)).toEqual(['OLD', 'NEW']);
+        expect(messageRepository.create).not.toHaveBeenCalled();
       } finally {
         if (prev === undefined) delete process.env.MESSAGE_RETENTION_DAYS;
         else process.env.MESSAGE_RETENTION_DAYS = prev;
@@ -936,14 +978,23 @@ describe('MessageProjector (inbound projection)', () => {
       expect(automationRules.evaluateInbound.mock.calls.map(([, m]) => (m as { id: string }).id)).toEqual(['A']);
     });
 
-    it('announces a message deleted for me while it waits for its turn as the revoked placeholder', async () => {
+    it.each([false, true])('clears a poll deleted for me while queued (fromMe=%s)', async fromMe => {
       const engine = makeEngine();
       engines.set(SESSION_ID, engine);
       const release = holdHooks();
 
       projector.handleInboundMessage(SESSION_ID, engine, makeIncoming({ id: 'A', chatId: chatA }));
-      const b = makeIncoming({ id: 'B', chatId: chatA, body: 'secret', quotedMessage: { id: 'Q', body: 'quoted' } });
-      projector.handleInboundMessage(SESSION_ID, engine, b);
+      const b = makeIncoming({
+        id: 'B',
+        chatId: chatA,
+        body: 'secret',
+        type: 'poll',
+        fromMe,
+        quotedMessage: { id: 'Q', body: 'quoted' },
+        poll: { name: 'secret', options: ['private choice'], allowMultipleAnswers: false },
+      });
+      if (fromMe) projector.handleOwnSendEcho(SESSION_ID, engine, b);
+      else projector.handleInboundMessage(SESSION_ID, engine, b);
       release.get('B')!();
       await flush();
       // The REST delete-for-me: no engine revoke event follows, so no message.revoked went out.
@@ -951,12 +1002,16 @@ describe('MessageProjector (inbound projection)', () => {
       release.get('A')!();
       await flush();
 
-      expect(dispatched()).toEqual(['message.received:A', 'message.received:B']);
+      expect(dispatched()).toEqual(['message.received:A', `${fromMe ? 'message.sent' : 'message.received'}:B`]);
       const announcedB = (webhookService.dispatch.mock.calls as unknown[][]).at(-1)![2] as Record<string, unknown>;
       expect(announcedB).toMatchObject({ id: 'B', body: '', type: 'revoked' });
       expect(announcedB).not.toHaveProperty('quotedMessage');
-      expect(eventsGateway.emitMessage).toHaveBeenLastCalledWith(SESSION_ID, announcedB);
-      expect(automationRules.evaluateInbound).toHaveBeenLastCalledWith(SESSION_ID, announcedB);
+      expect(announcedB).not.toHaveProperty('poll');
+      expect(fromMe ? eventsGateway.emitMessageSent : eventsGateway.emitMessage).toHaveBeenLastCalledWith(
+        SESSION_ID,
+        announcedB,
+      );
+      if (!fromMe) expect(automationRules.evaluateInbound).toHaveBeenLastCalledWith(SESSION_ID, announcedB);
     });
 
     it('announces a message edited while it waits for its turn with the edited body', async () => {
@@ -1094,10 +1149,18 @@ describe('MessageProjector (inbound projection)', () => {
         const { releaseA } = await echoWaitingBehindA();
         projector.applyReactionQueued(SESSION_ID, { messageId: 'S', senderId: 'x@c.us', reaction: 'ok' } as never);
         projector.applyReactionQueued(SESSION_ID, { messageId: 'S', senderId: 'y@c.us', reaction: '' } as never);
+        messageRepository.update.mockImplementation(() =>
+          Promise.resolve({ affected: inserted().includes('S') ? 1 : 0 }),
+        );
         releaseA();
         await flush();
 
-        expect(updatesAfterS()).toEqual([[whereS, { metadata: { keep: 1, reactions: { 'x@c.us': 'ok' } } }]]);
+        expect(updatesAfterS()).toEqual([
+          [
+            expect.objectContaining({ ...whereS, type: Not('revoked'), metadata: expect.anything() as unknown }),
+            { metadata: { keep: 1, reactions: { 'x@c.us': 'ok' } } },
+          ],
+        ]);
         expect(emitMessageReaction).toHaveBeenCalledTimes(2);
       });
     });
@@ -1297,6 +1360,39 @@ describe('MessageProjector (inbound projection)', () => {
       );
       expect(webhookService.dispatch).toHaveBeenCalledWith(SESSION_ID, 'message.sent', sent);
       expect(eventsGateway.emitMessageSent).toHaveBeenCalledWith(SESSION_ID, sent);
+    });
+  });
+
+  describe('handleMessageAck payload', () => {
+    it('carries the chat the engine named, on the socket and on both webhook events', () => {
+      const engine = makeEngine();
+      engines.set(SESSION_ID, engine);
+
+      projector.handleMessageAck(SESSION_ID, engine, 'M1', 'delivered', '120363000@g.us');
+      projector.handleMessageAck(SESSION_ID, engine, 'M2', 'failed', '120363000@g.us');
+
+      const expected = { id: 'M1', messageId: 'M1', status: 'delivered', ack: 2, chatId: '120363000@g.us' };
+      expect(eventsGateway.emitMessageAck).toHaveBeenCalledWith(SESSION_ID, expected);
+      expect(webhookService.dispatch).toHaveBeenCalledWith(SESSION_ID, 'message.ack', expected);
+      expect(webhookService.dispatch).toHaveBeenCalledWith(SESSION_ID, 'message.failed', {
+        id: 'M2',
+        messageId: 'M2',
+        status: 'failed',
+        ack: -1,
+        chatId: '120363000@g.us',
+      });
+    });
+
+    it('omits chatId when the engine update carried no chat', () => {
+      const engine = makeEngine();
+      engines.set(SESSION_ID, engine);
+
+      projector.handleMessageAck(SESSION_ID, engine, 'M1', 'delivered');
+
+      // Exact equality: the payload has no chatId key at all, not an undefined one.
+      const bare = { id: 'M1', messageId: 'M1', status: 'delivered', ack: 2 };
+      expect(eventsGateway.emitMessageAck).toHaveBeenCalledWith(SESSION_ID, bare);
+      expect(webhookService.dispatch).toHaveBeenCalledWith(SESSION_ID, 'message.ack', bare);
     });
   });
 });

@@ -1,4 +1,15 @@
 import type { IncomingMessage } from '../../engine/interfaces/whatsapp-engine.interface';
+import type { QueryDeepPartialEntity } from 'typeorm';
+import type { Message } from '../message/entities/message.entity';
+
+/** Clear content and archive pointers while retaining the revoked message's identity. */
+export const REVOKED_ROW_PATCH = {
+  body: '',
+  type: 'revoked',
+  metadata: null,
+  mediaPath: null,
+  mediaMimetype: null,
+} as unknown as QueryDeepPartialEntity<Message>;
 
 /**
  * Message types whose rows must show a media placeholder even when the payload carried none.
@@ -29,7 +40,7 @@ export const OMITTED_MEDIA = { mimetype: '', omitted: true } as const;
  *   and an empty object would be noise).
  */
 export function buildMessageMetadata(
-  message: Pick<IncomingMessage, 'media' | 'quotedMessage' | 'call' | 'buttons' | 'type'>,
+  message: Pick<IncomingMessage, 'media' | 'quotedMessage' | 'call' | 'buttons' | 'poll' | 'type'>,
   synthesizeOmittedMedia = false,
 ): Record<string, unknown> | undefined {
   const metadata: Record<string, unknown> = {};
@@ -41,6 +52,7 @@ export function buildMessageMetadata(
   if (message.quotedMessage) {
     metadata.quotedMessage = message.quotedMessage;
   }
+  if (message.poll) metadata.poll = message.poll;
   if (message.call) {
     metadata.call = message.call;
   }

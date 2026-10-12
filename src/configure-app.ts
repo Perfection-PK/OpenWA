@@ -1,4 +1,4 @@
-import { INestApplication } from '@nestjs/common';
+import { INestApplication, Type } from '@nestjs/common';
 import { ModuleRef } from '@nestjs/core';
 import helmet from 'helmet';
 import { Request, Response, NextFunction, json, urlencoded } from 'express';
@@ -14,6 +14,7 @@ import {
 import { ActiveKeyIndex } from './modules/auth/active-key-index';
 import { requestContextMiddleware } from './common/middleware/request-context.middleware';
 import { createLogger } from './common/services/logger.service';
+import { ShutdownService } from './common/services/shutdown.service';
 import { injectDashboardCspNonce } from './config/dashboard-csp';
 import { resolveCorsPolicy, isUpgradeInsecureRequestsEnabled, resolveBodyLimit } from './config/bootstrap-security';
 import { resolveRequestTimeoutMs } from './config/http-timeouts';
@@ -168,7 +169,8 @@ export function configureApp(app: INestApplication, options: ConfigureAppOptions
     },
     credentials: corsPolicy.credentials,
     methods: ['GET', 'POST', 'PUT', 'DELETE', 'PATCH', 'OPTIONS'],
-    allowedHeaders: ['Content-Type', 'X-API-Key', 'Authorization', 'X-Request-ID'],
+    // Idempotency-Key is the opt-in retry guard on the send routes (SendIdempotencyInterceptor).
+    allowedHeaders: ['Content-Type', 'X-API-Key', 'Authorization', 'X-Request-ID', 'Idempotency-Key'],
     // The throttlers are named (short/medium/long, plus ingress-ip on ingress), so @nestjs/throttler
     // suffixes every rate-limit header with the throttler name; IngressService emits the per-instance
     // bucket's headers under the same `-instance` suffix. Expose the suffixed names so browser clients
@@ -196,6 +198,8 @@ export function configureApp(app: INestApplication, options: ConfigureAppOptions
       'Retry-After-long',
       'Retry-After-instance',
       'Retry-After-ingress-ip',
+      // Marks a send answered from a stored Idempotency-Key response rather than sent again.
+      'Idempotent-Replayed',
     ],
     maxAge: 86400, // 24 hours
   });
@@ -206,6 +210,33 @@ export function configureApp(app: INestApplication, options: ConfigureAppOptions
   app.use((req: Request, res: Response, next: NextFunction) => {
     if (!req.originalUrl.includes('%00')) return next();
     res.status(400).json({ statusCode: 400, message: 'URL must not contain an encoded NUL', error: 'Bad Request' });
+  });
+
+  // Providers some test modules lack. Looked up through ModuleRef: a failed app.get() aborts the
+  // process instead of throwing.
+  const optional = <T>(token: Type<T>): T | undefined => {
+    try {
+      return app.get(ModuleRef).get(token, { strict: false });
+    } catch {
+      return undefined;
+    }
+  };
+
+  // Once the shutdown grace has elapsed, teardown runs every destroy hook before the listener
+  // closes, and a request admitted then would run against services being torn down. Refuse new
+  // requests from that point; admitted ones run until teardown ends and are then cut by the HTTP close
+  // (forceCloseConnections in main.ts). The health probes stay answered so
+  // readiness keeps reporting its draining state. Ahead of the budget, so no body is read.
+  const shutdown = optional(ShutdownService);
+  app.use((req: Request, res: Response, next: NextFunction) => {
+    if (!shutdown?.isTearingDown()) return next();
+    const path = req.path.toLowerCase();
+    if (path === '/api/health' || path.startsWith('/api/health/')) return next();
+    res.status(503).set('Connection', 'close').json({
+      statusCode: 503,
+      message: 'Server is shutting down',
+      error: 'Service Unavailable',
+    });
   });
 
   // Aggregate in-flight body budget (DoS hardening): once too many body bytes are being buffered
@@ -224,13 +255,7 @@ export function configureApp(app: INestApplication, options: ConfigureAppOptions
   // Requests without a recognised API key share a pool of a quarter of the budget, never less than
   // two BODY_SIZE_LIMIT bodies (half the default budget). With no AuthModule in the app (some test
   // modules) every request is unrecognised, which is the stricter side.
-  // Looked up through ModuleRef: a failed app.get() aborts the process instead of throwing.
-  let keyIndex: ActiveKeyIndex | undefined;
-  try {
-    keyIndex = app.get(ModuleRef).get(ActiveKeyIndex, { strict: false });
-  } catch {
-    keyIndex = undefined;
-  }
+  const keyIndex = optional(ActiveKeyIndex);
   app.use(
     createInflightBodyBudget(inflightBudgetBytes, {
       trustedProxies: (process.env.TRUSTED_PROXIES || '')

@@ -56,7 +56,7 @@ RUN npm ci --omit=dev --ignore-scripts \
     && npm cache clean --force
 
 HEALTHCHECK --interval=30s --timeout=10s --start-period=30s --retries=3 \
-    CMD curl -f http://localhost:2785/api/health/ready || exit 1
+    CMD curl -f "http://localhost:${PORT:-2785}/api/health/ready" || exit 1
 
 # dumb-init is PID 1; the entrypoint runs as root, fixes /app/data ownership, then drops to the
 # openwa user with gosu before it execs the command.
@@ -68,6 +68,12 @@ The image deliberately has no `USER openwa` directive and no `chown -R` over `/a
 walks every production dependency (#1045), so the entrypoint re-owns only the writable data volume
 and then drops privileges. Chromium comes from Chrome for Testing on amd64 and from Debian's
 `chromium` package on arm64; see the `Dockerfile` for the multi-arch build.
+
+The healthcheck probes the `PORT` of the container environment, falling back to 2785. To run the
+image on another port, pass `PORT` as an environment variable (`docker run -e PORT=8080 ...`): the
+probe never reads a mounted `.env` or `data/.env.generated`, so a `PORT` set only in one of those
+files moves the app but not the probe, and the container stays `unhealthy`. Boot refuses a `PORT`
+with surrounding whitespace, which the probe URL would carry verbatim.
 
 ### Docker Compose (Development)
 
@@ -383,6 +389,8 @@ LOG_FORMAT=json
 # chat-media/<sessionId>/; media this account sent also needs CHAT_MEDIA_ARCHIVE_OUTBOUND=true.
 # With the archive off, chat media stays inline on the message row (up to MEDIA_DOWNLOAD_MAX_BYTES),
 # where GET /api/sessions/:sessionId/messages/:chatId/:messageId/media still serves it.
+# With the archive on, the row keeps its inline copy too unless MESSAGE_INLINE_MEDIA=archive, which
+# makes the store the only copy of archived media: back it up alongside the database.
 # On S3 every key sits under the S3_KEY_PREFIX root (default media/, so media/chat-media/...).
 # While S3 has not been reachable since boot, or its credentials are missing, files go to
 # STORAGE_LOCAL_PATH instead.
@@ -484,7 +492,9 @@ WEBHOOK_DISPATCH_MAX_QUEUED=1000
 # The failing state and the cap are held per process, not per cluster.
 # The first 2xx from the webhook lifts it. With the queue disabled, a session parks at most a
 # quarter of WEBHOOK_DISPATCH_MAX_QUEUED behind that limit and sheds the rest, so other sessions
-# keep room.
+# keep room. Each running, parked or backoff-waiting inline delivery holds its event's inline media
+# (up to 4/3 x WEBHOOK_MEDIA_INLINE_MAX_BYTES as base64), about 1.3 GiB per process at the defaults
+# when every slot is taken; lower these caps or enable the queue to reduce it.
 # WEBHOOK_DEGRADED_SESSION_CONCURRENCY=
 # Delivery attempts (total, including the first) are set per webhook with the retryCount API field (default 3, range 0-5).
 

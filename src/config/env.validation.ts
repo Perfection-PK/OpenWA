@@ -100,6 +100,13 @@ export function validateEnv(config: EnvConfig): EnvConfig {
   };
   checkEnum('ENGINE_TYPE', ['whatsapp-web.js', 'baileys']);
   checkEnum('STORAGE_TYPE', ['local', 's3']);
+  checkEnum('MESSAGE_INLINE_MEDIA', ['inline', 'archive']);
+  // 'archive' drops the inline copy only after the archiver stored the file; with the archiver off
+  // nothing is ever stored, so the mode would silently do nothing. Refuse that rather than let an
+  // operator believe the inline copies are being reclaimed.
+  if (rawEnum('MESSAGE_INLINE_MEDIA') === 'archive' && config.CHAT_MEDIA_ARCHIVE_ENABLED !== 'true') {
+    errors.push('MESSAGE_INLINE_MEDIA=archive needs CHAT_MEDIA_ARCHIVE_ENABLED=true');
+  }
   // The S3 key root. A prefix that is absolute, traverses, or is only slashes would put this
   // deployment's objects (and its orphan sweeps' deletes) at the bucket root or outside its own root;
   // one with an empty or '.' segment builds keys an S3-compatible store refuses on every write.
@@ -190,15 +197,21 @@ export function validateEnv(config: EnvConfig): EnvConfig {
   // value identical to the parsed one.
   const DECIMAL_INTEGER = /^\d+$/;
 
-  const checkPort = (key: string): void => {
-    const raw = str(key);
+  const checkPort = (key: string, read: (key: string) => string | undefined = str): void => {
+    const raw = read(key);
     if (raw === undefined) return;
     const n = DECIMAL_INTEGER.test(raw) ? Number(raw) : NaN;
     if (!Number.isInteger(n) || n < 1 || n > 65535) {
       errors.push(`${key} must be an integer port in [1, 65535] (got "${raw}")`);
     }
   };
-  checkPort('PORT');
+  // PORT is read untrimmed: main.ts listens on it, and the image healthcheck and the startup banner
+  // splice it into a URL, where a padded "2785 " is malformed although Node still binds 2785. Only an
+  // empty value takes the default there, so validate the exact value with only '' meaning unset.
+  checkPort('PORT', key => {
+    const value = config[key];
+    return typeof value === 'string' && value !== '' ? value : undefined;
+  });
   checkPort('DATABASE_PORT');
   checkPort('REDIS_PORT');
 
@@ -225,6 +238,7 @@ export function validateEnv(config: EnvConfig): EnvConfig {
     'WEBHOOK_MAX_PER_SESSION', // 0 = unlimited
     'AUTOMATION_MAX_PER_SESSION', // 0 = unlimited
     'WEBHOOK_MEDIA_INLINE_MAX_BYTES', // 0 = never inline media
+    'WEBHOOK_FAILURE_PAYLOAD_RETENTION_HOURS', // 0 = failure rows keep no payload (no redrive)
     'EXPORT_INLINE_MEDIA_BUDGET_BYTES', // 0 = a data export carries no inline media at all
     'MESSAGE_LIST_INLINE_MEDIA_BUDGET_BYTES', // 0 = a message list carries no inline media at all
     'CHAT_MEDIA_ARCHIVE_TTL_DAYS', // 0 = keep archived chat media forever
@@ -289,6 +303,13 @@ export function validateEnv(config: EnvConfig): EnvConfig {
     const days = str(key);
     if (days !== undefined && Number(days) > 36500) {
       errors.push(`${key} must be at most 36500 (got "${days}")`);
+    }
+  }
+  // The same cutoff bound, expressed in hours.
+  {
+    const hours = str('WEBHOOK_FAILURE_PAYLOAD_RETENTION_HOURS');
+    if (hours !== undefined && Number(hours) > 36500 * 24) {
+      errors.push(`WEBHOOK_FAILURE_PAYLOAD_RETENTION_HOURS must be at most ${36500 * 24} (got "${hours}")`);
     }
   }
   // The grace windows build the same kind of cutoff (now minus the grace), so they share the cap.
@@ -405,6 +426,7 @@ export function validateEnv(config: EnvConfig): EnvConfig {
     'TEMPLATE_RENDER_MAX_CHARS',
     'STORAGE_IMPORT_MAX_BYTES',
     'STORAGE_IMPORT_MAX_ENTRIES',
+    'STORAGE_IMPORT_MAX_TOTAL_BYTES',
     'STORAGE_LIST_MAX_FILES',
     'BAILEYS_MESSAGE_STORE_LIMIT',
     // Each read fell back to its default on 0 or garbage, or passed a negative or fractional value on

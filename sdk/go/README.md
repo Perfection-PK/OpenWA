@@ -1,5 +1,7 @@
 # OpenWA Go SDK
 
+This document describes `main`. Send idempotency, webhook failure redrive, message-window filters, poll choices, and last-message types are unreleased additions after SDK 0.5.1 and require the corresponding server changes after OpenWA 0.24.0.
+
 Idiomatic Go client for the [OpenWA](https://github.com/rmyndharis/OpenWA) WhatsApp
 API Gateway. Stdlib-only (no dependencies), context-first, with typed errors and
 an injectable transport pipeline.
@@ -272,3 +274,16 @@ Cutting a release:
 > take it back, and the only remedy is to publish a higher version (and, if the
 > bad one must be discouraged, a `retract` directive in `go.mod`). Tag a commit
 > that is already green on `main`.
+
+## Send idempotency
+
+The example below requires the unreleased SDK changes on `main`; SDK 0.5.1 does not expose this per-send key argument. The server must also include the send idempotency changes after OpenWA 0.24.0.
+
+Supply a unique caller-owned key for one logical send and reuse it when retrying that same call. Keys contain 1-255 visible ASCII characters; unrelated calls must use different keys. The SDK forwards the key without changing its retry policy or generating one automatically.
+
+```go
+ctx := openwa.WithIdempotencyKey(context.Background(), "order-123")
+_, err := client.Messages.SendText(ctx, sessionID, openwa.SendTextRequest{ChatID: "628123@c.us", Text: "Hello"})
+```
+
+The gateway supports text, image, video, audio, document, sticker, location, contact, template, poll, reply and forward sends. Completed calls replay their response; pending or uncertain outcomes return 409, and a changed request with the same key returns 422. The gateway retains keys for 24 hours. Bulk, product and button operations have no such guarantee. Omit the key to preserve existing behavior.

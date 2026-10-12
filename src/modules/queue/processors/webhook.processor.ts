@@ -6,8 +6,10 @@ import { Repository } from 'typeorm';
 import { createLogger } from '../../../common/services/logger.service';
 import { QUEUE_NAMES } from '../queue-names';
 import { workerConnectionOptions, webhookWorkerConcurrency } from '../redis-connection';
+import { closeWorkerIfStarted } from './close-worker';
 import { WebhookJobData, WebhookPayload } from '../../webhook/webhook.service';
 import { Webhook } from '../../webhook/entities/webhook.entity';
+import { WebhookOutboxService } from '../../webhook/webhook-outbox.service';
 import { WebhookDeliveryFailure } from '../../webhook/entities/webhook-delivery-failure.entity';
 import {
   clearDeliveryFailureRows,
@@ -71,12 +73,21 @@ export class WebhookProcessor extends WorkerHost {
     private readonly failureRepository: Repository<WebhookDeliveryFailure>,
     private readonly hookManager: HookManager,
     private readonly configService: ConfigService,
+    private readonly outbox: WebhookOutboxService,
   ) {
     super();
     // WEBHOOK_DEGRADED_SESSION_CONCURRENCY, else a quarter of the worker pool.
     this.degradedSessionConcurrency =
       this.configService.get<number | undefined>('webhook.degradedSessionConcurrency') ??
       Math.max(1, Math.floor(webhookWorkerConcurrency() / 4));
+  }
+
+  // Stop taking jobs before the plugins are torn down, so a final attempt's webhook:error hook still
+  // reaches them; see IngressProcessor.onModuleDestroy. The wait is min(WEBHOOK_TIMEOUT + 5 s, 10 s), so it
+  // covers one POST plus its bookkeeping only while WEBHOOK_TIMEOUT is 5 s or less; a job still active at the
+  // cap is re-run after the next start.
+  async onModuleDestroy(): Promise<void> {
+    await closeWorkerIfStarted(this, this.configService.get<number>('webhook.timeout', 10000) + 5000);
   }
 
   async process(job: Job<WebhookJobData>, token?: string): Promise<WebhookJobResult> {
@@ -146,7 +157,7 @@ export class WebhookProcessor extends WorkerHost {
       // headers and secret, as the reconciler's replay does, so a receiver move or a rotated
       // secret or auth header applies to jobs already waiting in the queue.
       // A read error lands in the catch below and counts as a failed attempt, like a failed POST.
-      const current = await this.loadDeliverableWebhook(webhookId, event);
+      const current = await this.loadDeliverableWebhook(webhookId, event, sessionId);
       if (!current) {
         this.logger.warn('Skipping queued webhook delivery: webhook removed, disabled or unsubscribed', {
           webhookId,
@@ -156,6 +167,7 @@ export class WebhookProcessor extends WorkerHost {
           action: 'webhook_skipped_stale',
         });
         this.failingWebhooks.delete(webhookId);
+        await this.outbox.close(webhookId, payload.idempotencyKey, 'dispatched');
         return { statusCode: 0, success: false, error: 'webhook removed, disabled or unsubscribed', responseTime: 0 };
       }
       ctx.url = current.url;
@@ -171,6 +183,7 @@ export class WebhookProcessor extends WorkerHost {
 
       const { status, responseTime } = await this.postToReceiver(ctx, body, requestHeaders);
       this.failingWebhooks.delete(webhookId);
+      await this.outbox.close(webhookId, payload.idempotencyKey, 'dispatched');
       await this.recordSuccessfulDelivery(ctx, status, responseTime);
       return {
         statusCode: status,
@@ -186,9 +199,9 @@ export class WebhookProcessor extends WorkerHost {
   }
 
   /** The webhook row as it is now, or null when it was deleted, disabled or no longer takes `event`. */
-  private async loadDeliverableWebhook(webhookId: string, event: string): Promise<Webhook | null> {
+  private async loadDeliverableWebhook(webhookId: string, event: string, sessionId: string): Promise<Webhook | null> {
     const row = await this.webhookRepository.findOne({ where: { id: webhookId } });
-    return isDeliverableWebhook(row, event) ? row : null;
+    return isDeliverableWebhook(row, event, sessionId) ? row : null;
   }
 
   /**
@@ -322,10 +335,13 @@ export class WebhookProcessor extends WorkerHost {
         attempts: job.attemptsMade + 1,
         lastStatusCode: statusCodeFromError(errorMessage),
         lastError: clientError,
+        // The producer attaches the pre-hook event data only while payload retention is on.
+        ...(this.configService.get<number>('webhook.failurePayloadRetentionHours', 0) > 0 && job.data.replayData
+          ? { payload: job.data.replayData }
+          : {}),
       });
-      if (recorded) {
-        incrementWebhookDeliveryFailures();
-      }
+      if (recorded !== false) incrementWebhookDeliveryFailures();
+      if (recorded !== null) await this.outbox.close(webhookId, payload.idempotencyKey, 'dispatched');
     }
   }
 
@@ -353,7 +369,7 @@ export class WebhookProcessor extends WorkerHost {
     // record against the enqueue-time snapshot rather than lose the failure.
     let url = job.data.url;
     try {
-      const current = await this.loadDeliverableWebhook(webhookId, event);
+      const current = await this.loadDeliverableWebhook(webhookId, event, sessionId);
       if (!current) {
         return;
       }
@@ -394,12 +410,14 @@ export class WebhookProcessor extends WorkerHost {
       url,
       idempotencyKey: payload.idempotencyKey,
       deliveryId: payload.deliveryId,
-      attempts: job.attemptsMade,
+      attempts: Math.max(1, job.attemptsMade),
       lastStatusCode: null, // no HTTP exchange completed on the stalled attempts
       lastError: error.message,
+      ...(this.configService.get<number>('webhook.failurePayloadRetentionHours', 0) > 0 && job.data.replayData
+        ? { payload: job.data.replayData }
+        : {}),
     });
-    if (recorded) {
-      incrementWebhookDeliveryFailures();
-    }
+    if (recorded !== false) incrementWebhookDeliveryFailures();
+    if (recorded !== null) await this.outbox.close(webhookId, payload.idempotencyKey, 'dispatched');
   }
 }

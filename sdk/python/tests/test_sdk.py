@@ -18,6 +18,15 @@ from openwa.types import (
     AuthValidateResponse,
     BatchCancelResponse,
     HealthReadyResponse,
+    ForwardMessageRequest,
+    ReplyMessageRequest,
+    SendAudioRequest,
+    SendContactRequest,
+    SendLocationRequest,
+    SendMediaRequest,
+    SendPollRequest,
+    SendTemplateRequest,
+    SendTextRequest,
     WebhookDelivery,
     WebhookDeliveryEvent,
     WebhookEvent,
@@ -143,11 +152,17 @@ class TestClientCore:
         assert "name=my-bot" in backend.last_call.url
 
     def test_query_params_skip_none(self):
-        backend = MockBackend().on("GET", "/messages", body=[])
-        make_client(backend).messages.list("s1", {"chatId": "a@c.us", "limit": 10})
+        backend = MockBackend().on("GET", "/messages", body={"messages": [], "total": 0, "unknownTimestampTotal": 2})
+        result = make_client(backend).messages.list("s1", {
+            "chatId": "a@c.us", "limit": 10, "since": 1789855200000.5, "until": 1789941600000,
+            "direction": "incoming", "orderBy": "timestamp", "type": "image", "messageId": "M1",
+        })
         url = backend.last_call.url
         assert "chatId=a%40c.us" in url
         assert "limit=10" in url
+        for field in ("since=1789855200000.5", "until=1789941600000", "direction=incoming", "orderBy=timestamp", "type=image", "messageId=M1"):
+            assert field in url
+        assert result["unknownTimestampTotal"] == 2
 
     def test_build_url_escapes_a_literal_percent_in_a_query_value(self):
         # httpx before 0.27.1 sent "%41" unescaped, so the gateway decoded it to "A".
@@ -260,6 +275,82 @@ class TestClientCore:
 
 
 class TestMessages:
+    @pytest.mark.parametrize("key", [None, "!", "a" * 255])
+    def test_send_methods_forward_keys_without_changing_json(self, key: str | None) -> None:
+        backend = MockBackend().on("POST", "/messages/", body={"messageId": "m", "timestamp": 1})
+        client = make_client(backend)
+        text: SendTextRequest = {"chatId": "a@c.us", "text": "hello", "quotedMessageId": "q"}
+        media: SendMediaRequest = {"chatId": "a@c.us", "url": "https://media/image", "caption": "image"}
+        audio: SendAudioRequest = {"chatId": "a@c.us", "url": "https://media/audio", "ptt": True}
+        location: SendLocationRequest = {"chatId": "a@c.us", "latitude": -6.2, "longitude": 106.8}
+        contact: SendContactRequest = {"chatId": "a@c.us", "contactName": "A", "contactNumber": "628"}
+        template: SendTemplateRequest = {"chatId": "a@c.us", "templateId": "t", "vars": {}}
+        poll: SendPollRequest = {"chatId": "a@c.us", "name": "Q", "options": ["A", "B"]}
+        reply: ReplyMessageRequest = {"chatId": "a@c.us", "quotedMessageId": "q", "text": "reply"}
+        forward: ForwardMessageRequest = {"fromChatId": "a@c.us", "toChatId": "b@c.us", "messageId": "m"}
+
+        client.messages.send_text("s", text, idempotency_key=key)
+        client.messages.send_image("s", media, idempotency_key=key)
+        client.messages.send_video("s", media, idempotency_key=key)
+        client.messages.send_audio("s", audio, idempotency_key=key)
+        client.messages.send_document("s", media, idempotency_key=key)
+        client.messages.send_sticker("s", media, idempotency_key=key)
+        client.messages.send_location("s", location, idempotency_key=key)
+        client.messages.send_contact("s", contact, idempotency_key=key)
+        client.messages.send_template("s", template, idempotency_key=key)
+        client.messages.send_poll("s", poll, idempotency_key=key)
+        client.messages.reply("s", reply, idempotency_key=key)
+        client.messages.forward("s", forward, idempotency_key=key)
+
+        expected = [
+            ("send-text", text), ("send-image", media), ("send-video", media), ("send-audio", audio),
+            ("send-document", media), ("send-sticker", media), ("send-location", location),
+            ("send-contact", contact), ("send-template", template), ("send-poll", poll),
+            ("reply", reply), ("forward", forward),
+        ]
+        assert len(backend.calls) == len(expected)
+        for call, (segment, body) in zip(backend.calls, expected):
+            assert call.method == "POST"
+            assert call.url == f"http://localhost:2785/api/sessions/s/messages/{segment}"
+            assert call.body == body
+            if key is None:
+                assert "idempotency-key" not in call.headers
+            else:
+                assert call.headers["idempotency-key"] == key
+
+    def test_send_keys_stay_local_to_each_request(self) -> None:
+        backend = MockBackend().on("POST", "/send-text", body={"messageId": "m", "timestamp": 1})
+        client = make_client(backend)
+        body: SendTextRequest = {"chatId": "a@c.us", "text": "hello"}
+        client.messages.send_text("s", body, idempotency_key="first-key")
+        client.messages.send_text("s", body, idempotency_key="second-key")
+        client.messages.send_text("s", body)
+        assert [call.headers.get("idempotency-key") for call in backend.calls] == ["first-key", "second-key", None]
+        assert all(call.body == body for call in backend.calls)
+
+    def test_send_key_overrides_default_header_without_changing_defaults(self) -> None:
+        backend = MockBackend().on("POST", "/send-text", body={"messageId": "m", "timestamp": 1})
+        defaults = {"iDeMpOtEnCy-KeY": "default-key", "X-Trace": "trace"}
+        client = OpenWAClient(
+            base_url="http://localhost:2785", api_key="owa_k1_test",
+            default_headers=defaults, transport=backend.as_transport(),
+        )
+        body: SendTextRequest = {"chatId": "a@c.us", "text": "hello"}
+        client.messages.send_text("s", body, idempotency_key="request-key")
+        assert backend.last_call.headers["idempotency-key"] == "request-key"
+        assert backend.last_call.headers["x-trace"] == "trace"
+        client.messages.send_text("s", body)
+        assert backend.last_call.headers["idempotency-key"] == "default-key"
+        assert defaults == {"iDeMpOtEnCy-KeY": "default-key", "X-Trace": "trace"}
+
+    @pytest.mark.parametrize("key", ["", " ", "contains space", "key\n", "\u00e9", "a" * 256])
+    def test_invalid_send_keys_are_refused_before_transport(self, key: str) -> None:
+        backend = MockBackend()
+        client = make_client(backend)
+        with pytest.raises(ValueError, match="1-255 visible ASCII"):
+            client.messages.send_text("s", {"chatId": "a@c.us", "text": "hello"}, idempotency_key=key)
+        assert backend.calls == []
+
     def test_send_text_uses_send_text_path(self):
         backend = MockBackend().on("POST", "/send-text", body={"messageId": "m1", "timestamp": 1})
         make_client(backend).messages.send_text("s1", {"chatId": "a@c.us", "text": "hi"})
@@ -734,6 +825,16 @@ class TestWebhooks:
         make_client(backend).webhooks.create("s", {"url": "u", "events": ["message.received"], "filters": filters})
         assert backend.last_call.body == {"url": "u", "events": ["message.received"], "filters": filters}
 
+    def test_redrive_delivery_failures_posts_the_filter_or_an_empty_body(self):
+        result = {"redriven": 1, "delivered": 1, "enqueued": 0, "failed": 0, "skipped": 0, "remaining": 0}
+        backend = MockBackend().on("POST", "/api/webhooks/delivery-failures/redrive", body=result)
+        client = make_client(backend)
+        assert client.webhooks.redrive_delivery_failures({"sessionId": "s", "limit": 10}) == result
+        assert backend.last_call.method == "POST"
+        assert backend.last_call.body == {"sessionId": "s", "limit": 10}
+        client.webhooks.redrive_delivery_failures()
+        assert backend.last_call.body == {}
+
 
 class TestStatus:
     def test_send_image_video_forward_nested_media_body(self):
@@ -802,6 +903,14 @@ class TestStatus:
 
 
 class TestChatsAndHealth:
+    def test_chats_preserve_optional_last_message_type(self):
+        backend = MockBackend().on("GET", "/chats", body=[
+            {"id": "photo@c.us", "lastMessageType": "image"}, {"id": "empty@c.us"},
+        ])
+        chats = make_client(backend).chats.list("s")
+        assert chats[0]["lastMessageType"] == "image"
+        assert "lastMessageType" not in chats[1]
+
     def test_chats(self):
         backend = MockBackend()
         backend.on("GET", "/chats", body=[])

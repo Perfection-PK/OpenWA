@@ -11,6 +11,7 @@ import {
   type ChatMessageView,
 } from '../../utils/chatMessages';
 import { shouldFetchOlderMessages } from '../../utils/scrollDecision';
+import ArchivedMediaPreview, { type ArchivedMediaKind } from './ArchivedMediaPreview';
 import MessageBody from './MessageBody';
 
 // Stable per-sender colour for group message labels, like WhatsApp gives each participant a colour.
@@ -281,6 +282,7 @@ function ChatThread({
 
           const isMediaMessage = msg.type !== 'text';
           const mediaInfo = msg.metadata?.media;
+          const displayBody = msg.body || (msg.type === 'poll' ? msg.metadata?.poll?.name : undefined);
 
           const renderMedia = () => {
             if (msg.type === 'revoked') return null;
@@ -318,7 +320,7 @@ function ChatThread({
               // Not a plain label: the bytes exist behind the per-message media route, so this is the
               // only handle the viewer has on them.
               const fetchState = msg.waMessageId ? mediaFetch[msg.waMessageId] : undefined;
-              return (
+              const downloadButton = (
                 <button
                   type="button"
                   className="message-media-omitted"
@@ -332,6 +334,33 @@ function ChatThread({
                   )}
                 </button>
               );
+              // `archived` marks a copy MESSAGE_INLINE_MEDIA=archive moved off the row once the archive
+              // store held it: the bubble rendered inline before, so it previews inline still, fetched
+              // lazily from the same route. Documents keep the button (there is nothing to preview),
+              // and so does a plain over-budget marker, see ArchivedMediaPreview for why.
+              const previewKind: ArchivedMediaKind | null =
+                msg.type === 'image' || msg.type === 'sticker'
+                  ? 'image'
+                  : msg.type === 'video'
+                    ? 'video'
+                    : msg.type === 'audio' || msg.type === 'voice'
+                      ? 'audio'
+                      : null;
+              const waMessageId = msg.waMessageId;
+              if (mediaInfo.archived && previewKind && sessionId && waMessageId) {
+                return (
+                  <ArchivedMediaPreview
+                    key={`${sessionId}:${activeChat.id}:${waMessageId}`}
+                    kind={previewKind}
+                    load={signal => sessionApi.getMessageMediaBlob(sessionId, activeChat.id, waMessageId, signal)}
+                    alt={mediaInfo.filename || t('chats.media.image')}
+                    fallback={downloadButton}
+                    measureMedia={measureMedia}
+                    onMediaLoad={onMediaLoad}
+                  />
+                );
+              }
+              return downloadButton;
             }
             const mediaSrc = getMediaSrc(mediaInfo);
             if (!mediaSrc) return null;
@@ -433,12 +462,22 @@ function ChatThread({
                   ) : isMasked ? (
                     <div className="message-text message-masked">{t('chats.messageMasked')}</div>
                   ) : (
-                    msg.body &&
-                    (!mediaInfo || msg.body !== mediaInfo.filename) &&
+                    displayBody &&
+                    (!mediaInfo || displayBody !== mediaInfo.filename) &&
                     msg.type !== 'location' &&
                     msg.type !== 'call' && (
-                      <MessageBody text={resolveMentions(msg.body, mentionNames)} className="message-text" />
+                      <MessageBody text={resolveMentions(displayBody, mentionNames)} className="message-text" />
                     )
+                  )}
+
+                  {!isRevoked && msg.type === 'poll' && (msg.metadata?.poll?.options?.length ?? 0) > 0 && (
+                    <ul className="message-text" aria-label={t('messageTester.pollOptions')}>
+                      {msg.metadata!.poll!.options.map((option, index) => (
+                        <li key={index}>
+                          <bdi>{option}</bdi>
+                        </li>
+                      ))}
+                    </ul>
                   )}
 
                   {/* Inbound business prompt choices; a tap calls POST .../messages/click-button. */}

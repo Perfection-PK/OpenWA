@@ -53,11 +53,12 @@ import { isTransientDbError, isUniqueViolation } from '../../common/utils/db-err
 import { resolveFeatureFlags } from '../../config/feature-flags';
 import { IWhatsAppEngine, ChatSummary, ChatState } from '../../engine/interfaces/whatsapp-engine.interface';
 import { createLogger } from '../../common/services/logger.service';
+import { ShutdownService } from '../../common/services/shutdown.service';
 import { HookManager } from '../../core/hooks';
 import { LidMappingStoreService } from '../../engine/identity/lid-mapping-store.service';
 import { resolveJidCandidates } from '../../engine/identity/jid-candidates';
 import { Message } from '../message/entities/message.entity';
-import { SessionStoppedException } from './session-engine-controls';
+import { ServerShuttingDownException, SessionStoppedException } from './session-engine-controls';
 // Type-only: the module binds this class to PLUGIN_SESSION_PORT with a `useExisting` alias, which
 // TypeScript does not check, so `implements` is what keeps the two in step.
 import type { PluginSessionPort } from '../../core/plugins/plugin-host-ports';
@@ -85,6 +86,13 @@ function isTransientLaunchFailure(error: unknown): boolean {
 
 /** Pause between sequential auto-start launches so a burst of Chromium boots does not spike the host. */
 export const AUTOSTART_THROTTLE_MS = 2_000;
+
+/**
+ * How long shutdown waits for the auto-start run once the engines are destroyed. Short: the webhook
+ * drain, worker close, usage flush, plugin phase, releaseAll and the HTTP and database close still have
+ * to fit the kill deadline (see shutdown-budget.ts).
+ */
+export const AUTOSTART_SHUTDOWN_WAIT_MS = 5_000;
 
 /** List window for {@link SessionService.findAll}, plus an optional exact session-name filter. */
 export interface SessionListOptions extends ListOptions {
@@ -165,7 +173,19 @@ export class SessionService implements OnModuleDestroy, OnModuleInit, OnApplicat
     // behaves as unowned there, which is what a single-process deployment is anyway.
     @Optional()
     private readonly ownership?: SessionOwnershipService,
+    // The drain signal, set when shutdown begins and SHUTDOWN_DELAY_MS before onModuleDestroy. Same
+    // source the reconnect scheduler and the takeover sweep consult.
+    @Optional()
+    private readonly shutdownService?: ShutdownService,
   ) {}
+
+  /**
+   * True from the start of the shutdown drain. An engine launched during the drain would be torn
+   * down seconds later by onModuleDestroy, so starts are refused from here, not from teardown.
+   */
+  private get stopping(): boolean {
+    return this.shuttingDown || this.shutdownService?.isShuttingDown() === true;
+  }
 
   /**
    * On startup, mark as disconnected the sessions whose engines this process was running, since no
@@ -272,7 +292,7 @@ export class SessionService implements OnModuleDestroy, OnModuleInit, OnApplicat
     for (let i = 0; i < sessions.length; i++) {
       // A shutdown landing mid-run must not launch anything further: onModuleDestroy tears down what
       // exists, and a browser launched after that point is never destroyed.
-      if (this.shuttingDown) {
+      if (this.stopping) {
         this.logger.log(`Auto-start stopped at ${i} of ${sessions.length} session(s): shutting down`, {
           action: 'auto_start_aborted',
         });
@@ -290,6 +310,17 @@ export class SessionService implements OnModuleDestroy, OnModuleInit, OnApplicat
       const session = sessions[i];
       try {
         await this.start(session.id);
+        // A launch shutdown tore down mid-init is refused with ServerShuttingDownException (caught
+        // below). One already past the engine's post-init checks resolves, but shutdown can still
+        // destroy its engine during the start's last row read or its claim bookkeeping, so
+        // nothing is left running.
+        if (this.shuttingDown && !this.isActive(session.id)) {
+          this.logger.log(`Auto-start abandoned for session ${session.name}: shutting down`, {
+            sessionId: session.id,
+            action: 'auto_start_aborted',
+          });
+          return;
+        }
         this.logger.log(`Auto-started session: ${session.name}`, {
           sessionId: session.id,
           action: 'auto_start_success',
@@ -301,6 +332,14 @@ export class SessionService implements OnModuleDestroy, OnModuleInit, OnApplicat
             sessionId: session.id,
             action: 'auto_start_skipped',
           });
+        } else if (error instanceof ServerShuttingDownException) {
+          // The launch in flight when shutdown began, refused so nothing outlives the teardown.
+          this.logger.log(`Auto-start abandoned for session ${session.name}: shutting down`, {
+            sessionId: session.id,
+            action: 'auto_start_aborted',
+          });
+          // Nothing later in the run would start either, and shutdown waits on this loop.
+          return;
         } else {
           const errorMessage = error instanceof Error ? error.message : 'Unknown error';
           this.logger.error(`Auto-start failed for session: ${session.name}`, errorMessage, {
@@ -310,7 +349,8 @@ export class SessionService implements OnModuleDestroy, OnModuleInit, OnApplicat
         }
       }
       // Throttle between sequential Chromium launches; no need to wait after the last one.
-      if (i < sessions.length - 1) {
+      // Skipped once shutdown began: onModuleDestroy awaits this loop, and the check above ends it.
+      if (i < sessions.length - 1 && !this.stopping) {
         await setTimeout(AUTOSTART_THROTTLE_MS);
       }
     }
@@ -322,16 +362,31 @@ export class SessionService implements OnModuleDestroy, OnModuleInit, OnApplicat
     this.shuttingDown = true;
     this.watchdog.stop();
     this.ownership?.stopHeartbeat();
-    // A SIGTERM during boot can land while the detached auto-start is mid-launch. Let that one
-    // settle — the flag above stops the loop taking another — so the engine it registers is torn
-    // down below instead of outliving the process as an orphaned browser. Bounded by the launch
-    // already in flight, never by the whole run.
-    await this.autoStartRun;
-    // Reconnect timers + engine teardown belong to the lifecycle owner.
+    // Reconnect timers + engine teardown belong to the lifecycle owner. Run before waiting on the
+    // detached auto-start: a launch it has in flight already registered its engine, so this destroys
+    // it and the run unwinds. Waiting first would let a stalled init (an unreachable WhatsApp Web, a
+    // proxy that never answers) hold the teardown until its init deadline, past the kill deadline.
     await this.engineLifecycle.shutdown();
+    // The lifecycle is closed now, so the run registers no further engine; awaited so its claim
+    // release and status writes land before releaseAll and the database close. Bounded: a
+    // whatsapp-web.js launch still starting Chromium has no browser handle yet, so the destroy
+    // closes nothing and that init runs until whatsapp-web.js settles it, at worst to the init
+    // deadline. Past the bound, its browser is left to Puppeteer's exit hook.
+    let timer: NodeJS.Timeout | undefined;
+    const settled = await Promise.race([
+      this.autoStartRun.then(() => true),
+      new Promise<false>(resolve => (timer = globalThis.setTimeout(resolve, AUTOSTART_SHUTDOWN_WAIT_MS, false))),
+    ]);
+    clearTimeout(timer);
+    if (!settled) {
+      this.logger.warn(`Auto-start still launching after ${AUTOSTART_SHUTDOWN_WAIT_MS}ms; shutting down without it`, {
+        action: 'auto_start_shutdown_timeout',
+      });
+    }
     // Released only after the engines are actually down, so a peer never claims a session this
-    // process is still holding open.
-    await this.ownership?.releaseAll();
+    // process is still holding open. A start still in flight may own a browser the teardown could
+    // not reach (one the bound above gave up on), so its claim is kept and lapses as after a hard kill.
+    await this.ownership?.releaseAll(this.startReservations.keys());
   }
 
   async create(dto: CreateSessionDto): Promise<Session> {
@@ -602,6 +657,9 @@ export class SessionService implements OnModuleDestroy, OnModuleInit, OnApplicat
    * the engine start refuses them a row still marked stopped when it reads it.
    */
   async start(id: string, { explicit = false }: { explicit?: boolean } = {}): Promise<Session> {
+    // Refused before the claim, the stop clear and the session:starting hook: none of them should run
+    // for a start the exiting process will not keep.
+    this.refuseIfShuttingDown();
     // At the cap, refused before the claim: the engine's own cap check runs after it, and its
     // refusal releases the claim to no node. A row nobody holds is never adopted by a peer, while a
     // lapsed lease left where it is gets taken over by one with room. The engine check stays the
@@ -629,6 +687,10 @@ export class SessionService implements OnModuleDestroy, OnModuleInit, OnApplicat
       if (left > 0) this.startReservations.set(id, left);
       else this.startReservations.delete(id);
     }
+  }
+
+  private refuseIfShuttingDown(): void {
+    if (this.stopping) throw new ServerShuttingDownException();
   }
 
   private async claimAndStart(id: string, explicit: boolean): Promise<Session> {
@@ -684,6 +746,8 @@ export class SessionService implements OnModuleDestroy, OnModuleInit, OnApplicat
     if (this.stopRequests.get(id) !== stopRequestsBefore) {
       throw new SessionStoppedException(`Session ${id} was stopped`);
     }
+    // Shutdown may have begun while the claim was pending; the stop clear and the hook must not run.
+    this.refuseIfShuttingDown();
     try {
       return await this.engineLifecycle.start(id, { explicit });
     } catch (error) {
@@ -702,17 +766,38 @@ export class SessionService implements OnModuleDestroy, OnModuleInit, OnApplicat
       if (this.stopRequests.get(id) !== stopRequestsBefore) {
         throw new SessionStoppedException(`Session ${id} was stopped`);
       }
-      // The lease may have lapsed while the first attempt ran; the retry must keep holding the
-      // claim, never 409 on the session it already owns.
-      if (this.ownership && !(await this.ownership.claim(id))) {
-        await this.findOne(id);
-        throw new ConflictException(`Session ${id} is running on another node`);
+      try {
+        // Shutdown may have released this node's claims during the delay; re-claiming would pin the row.
+        this.refuseIfShuttingDown();
+        // The lease may have lapsed while the first attempt ran; the retry must keep holding the
+        // claim, never 409 on the session it already owns.
+        if (this.ownership && !(await this.ownership.claim(id))) {
+          await this.findOne(id);
+          throw new ConflictException(`Session ${id} is running on another node`);
+        }
+        // Checked again: a stop that landed during the re-claim leaves the claim for claimAndStart's catch to release.
+        if (this.stopRequests.get(id) !== stopRequestsBefore) {
+          throw new SessionStoppedException(`Session ${id} was stopped`);
+        }
+        // And shutdown may have begun during the re-claim; the stop clear and the hook must not run.
+        this.refuseIfShuttingDown();
+        return await this.engineLifecycle.start(id, { explicit });
+      } catch (retryError) {
+        // The first attempt may have left FAILED, which the boot reset, auto-start and the takeover
+        // sweep all skip, and shutdown refused the retry that would have overwritten it. Handed back
+        // as DISCONNECTED so the next boot restores the session. Best-effort: the refusal is the answer.
+        // Fenced like the boot reset: a FAILED on a row a peer has since adopted is the peer's.
+        if (retryError instanceof ServerShuttingDownException) {
+          const claimable = this.ownership?.claimableWhere() ?? [{}];
+          await this.sessionRepository
+            .update(
+              claimable.map(clause => ({ ...clause, id, status: SessionStatus.FAILED })),
+              { status: SessionStatus.DISCONNECTED },
+            )
+            .catch(() => undefined);
+        }
+        throw retryError;
       }
-      // Checked again: a stop that landed during the re-claim leaves the claim for claimAndStart's catch to release.
-      if (this.stopRequests.get(id) !== stopRequestsBefore) {
-        throw new SessionStoppedException(`Session ${id} was stopped`);
-      }
-      return this.engineLifecycle.start(id, { explicit });
     }
   }
 

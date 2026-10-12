@@ -1,5 +1,7 @@
 # OpenWA SDKs
 
+This document describes `main`. Send idempotency, webhook failure redrive, message-window filters, poll choices, and last-message types are unreleased additions after SDK 0.5.1 and require the corresponding server changes after OpenWA 0.24.0.
+
 Official client libraries for [OpenWA](https://github.com/rmyndharis/OpenWA), the
 open-source WhatsApp API Gateway. OpenWA is an independent project, not
 affiliated with or endorsed by WhatsApp or Meta.
@@ -30,7 +32,7 @@ All five SDKs expose the same fluent resource surface:
 | `messages`  | list, sendText, sendImage/Video/Audio/Document/Sticker, sendLocation, sendContact, sendTemplate, sendPoll, reply, clickButton, forward, react, delete, editMessage, history, reactions, media, pin, unpin, star, votePoll, sendBulk, batchStatus, cancelBatch                              |
 | `contacts`  | list, get, check, profilePicture, profilePictures, phone, upsert, delete, block, unblock, listBlocked                                                                                                                                                                                      |
 | `groups`    | list, get, create, joinGroup, joinInfo, add/remove/promote/demoteParticipants, setSubject, setDescription, get/updateGroupSettings, leave, getPicture, setPicture, deletePicture, inviteCode, revokeInviteCode, getMembershipRequests, approveMembershipRequests, rejectMembershipRequests |
-| `webhooks`  | list, listAll, deliveryFailures, get, create, update, delete, test                                                                                                                                                                                                                         |
+| `webhooks`  | list, listAll, deliveryFailures, redriveDeliveryFailures, get, create, update, delete, test                                                                                                                                                                                                |
 | `chats`     | list, markRead, markUnread, archive, pin, mute, clearMessages, delete, sendState, subscribePresence, getPresence                                                                                                                                                                           |
 | `labels`    | list, get, chats, forChat, upsert, delete, addToChat, removeFromChat _(WhatsApp Business)_                                                                                                                                                                                                 |
 | `channels`  | list, get, messages, create, delete, mute, subscribe, unsubscribe, demoteAdmin, transferOwnership _(Newsletters)_                                                                                                                                                                          |
